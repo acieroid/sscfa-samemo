@@ -191,37 +191,47 @@ end
 module ANFStructure =
 struct
   type var = string
-  and call = atom * atom
   and lam = var * exp
-  and atom =
+  and aexp =
     | Var of var
     | Lambda of lam
+  and cexp =
+    | Call of aexp * aexp
+    | Set of var * aexp
   and exp =
-    | Let of var * call *  exp
-    | Call of call
-    | Atom of atom
+    | Let of var * cexp *  exp
+    | CExp of cexp
+    | AExp of aexp
 
   let rec free = function
-    | Let (v, (f, ae), exp) ->
-      StringSet.remove v
-        (StringSet.union (free exp)
-           (StringSet.union (free (Atom f)) (free (Atom ae))))
+    | Let (v, cexp, exp) ->
+      StringSet.remove v (StringSet.union (free_cexp cexp) (free exp))
+    | AExp ae -> free_aexp ae
+    | CExp ce -> free_cexp ce
+  and free_cexp = function
     | Call (f, ae) ->
-      (StringSet.union (free (Atom f)) (free (Atom ae)))
-    | Atom (Var v) -> StringSet.singleton v
-    | Atom (Lambda (v, exp)) -> StringSet.remove v (free exp)
+      StringSet.union (free_aexp f) (free_aexp ae)
+    | Set (v, ae) ->
+      StringSet.add v (free_aexp ae)
+  and free_aexp = function
+    | Var v -> StringSet.singleton v
+    | Lambda (v, exp) -> StringSet.remove v (free exp)
 
-  let rec string_of_atom = function
+  let rec string_of_exp = function
+    | Let (v, cexp, exp) ->
+      Printf.sprintf "(let ((%s %s)) %s)"
+        v (string_of_cexp cexp) (string_of_exp exp)
+    | CExp ce -> string_of_cexp ce
+    | AExp ae -> string_of_aexp ae
+  and string_of_cexp = function
+    | Call (f, ae) ->
+      Printf.sprintf "(%s %s)" (string_of_aexp f) (string_of_aexp ae)
+    | Set (v, ae) ->
+      Printf.sprintf "(set! %s %s)" v (string_of_aexp ae)
+  and string_of_aexp = function
     | Var v -> v
     | Lambda (v, e) ->
-      "(lambda (" ^ v ^ ") " ^ (string_of_exp e) ^ ")"
-  and string_of_exp = function
-    | Let (v, (f, ae), exp) ->
-      "(let ((" ^ v ^ " (" ^ (string_of_atom f) ^ " " ^ (string_of_atom ae)
-      ^ "))) " ^ (string_of_exp exp) ^ ")"
-    | Call (f, ae) ->
-      "(" ^ (string_of_atom f) ^ " " ^ (string_of_atom ae) ^ ")"
-    | Atom a -> string_of_atom a
+      Printf.sprintf "(lambda (%s) %s)" v (string_of_exp e)
 
   module Address = IntegerAddress
   type addr = Address.t
@@ -235,10 +245,17 @@ struct
     order_concat [lazy (Pervasives.compare lam1 lam2);
                   lazy (Env.compare env1 env2)]
 
-  module Lattice = SetLattice(struct
-      type t = clo
-      let compare = compare_clo
-    end)
+  module V = struct
+    type t =
+      | Clos of clo
+      | Undefined
+    let compare x y = match x, y with
+      | Clos c, Clos c' -> compare_clo c c'
+      | Clos _, _ -> 1
+      | _, Clos _ -> -1
+      | Undefined, Undefined -> 0
+  end
+  module Lattice = SetLattice(V)
   module Store = MapStore(Lattice)(Address)
 
   type store = Store.t
@@ -289,7 +306,7 @@ struct
 
   let atomic_eval atom env store = match atom with
     | Var var -> Store.lookup store (Env.lookup env var)
-    | Lambda lam -> Lattice.abst [(lam, env)]
+    | Lambda lam -> Lattice.abst [V.Clos (lam, env)]
 
   let alloc v state = match state with
     | (_, _, store) -> Address.alloc (Store.size store + 1)
@@ -299,34 +316,14 @@ end
 module type StackSummary =
 sig
   type t
+  (** The empty stack summary *)
   val empty : t
+  (** Define ordering between stack summaries *)
   val compare : t -> t -> int
+  (** Convert a stack summary to a printable string *)
   val to_string : t -> string
+  (** Add information related to a new frame in the stack summary *)
   val push : t -> ANFStructure.frame -> t
-end
-
-module EmptyStackSummary =
-struct
-  type t = Empty
-  let empty = Empty
-  let compare _ _ = 0
-  let to_string _ = "[]"
-  let push _ _ = Empty
-end
-
-module FrameSetSummary =
-struct
-  module FrameSet = BatSet.Make(struct
-      type t = ANFStructure.frame
-      let compare = ANFStructure.compare_frame
-    end)
-  type t = FrameSet.t
-  let empty = FrameSet.empty
-  let compare = FrameSet.compare
-  let to_string ss = "[" ^ (String.concat ", "
-                              (BatList.map ANFStructure.string_of_frame
-                                 (FrameSet.elements ss))) ^ "]"
-  let push ss f = FrameSet.add f ss
 end
 
 module ReachableAddressesSummary =
@@ -351,56 +348,7 @@ struct
     AddressSet.union ss (touch f)
 end
 
-module ANFStackSummary =
-  functor (Summary : StackSummary) ->
-  struct
-    include ANFStructure
-
-    type conf = state * Summary.t
-
-    let compare_conf (s1, ss1) (s2, ss2) =
-      order_concat [lazy (compare_state s1 s2);
-                    lazy (Summary.compare ss1 ss2)]
-
-    let string_of_conf ((e, _, _), ss) = (string_of_exp e) ^ " " ^
-                                         (Summary.to_string ss)
-
-    let inject e =
-      ((e, Env.empty, Store.empty), Summary.empty)
-
-    let step (state, ss) frame = match state with
-      | (Call (f, ae), env, store) ->
-        let rands = atomic_eval f env store in
-        let rator = atomic_eval ae env store in
-        List.fold_left (fun acc ((v, e), env') ->
-            let a = alloc v state in
-            ((StackUnchanged,
-              ((e, Env.extend env' v a,
-                Store.join store a rator), ss))
-             :: acc))
-          [] (Lattice.concretize rands)
-      | (Let (v, call, e), env, store) ->
-        let k = (v, e, env) in
-        [(StackPush k, ((Call call, env, store), (Summary.push ss k)))]
-      | (Atom ae, env, store) ->
-        begin match frame with
-          | Some ((_, ss'), (v, e, env')) ->
-            let a = alloc v state in
-            let env'' = Env.extend env' v a in
-            let store' = Store.join store a (atomic_eval ae env store) in
-            [StackPop (v, e, env'), ((e, env'', store'), ss')]
-          | None ->
-            print_endline "No frame when popping, reached final state";
-            []
-        end
-
-    module ConfOrdering = struct
-      type t = conf
-      let compare = compare_conf
-    end
-  end
-
-module ANFGarbageCollected =
+module ANFGarbageCollected : Lang_signature with type exp = ANFStructure.exp =
 struct
   include ANFStructure
 
@@ -418,31 +366,49 @@ struct
   let inject e =
     ((e, Env.empty, Store.empty), Summary.empty)
 
+  let apply_kont f d state = match f with
+    | (v, e, env') ->
+      let a = alloc v state in
+      let env'' = Env.extend env' v a in
+      let (_, _, store) = state in
+      let store' = Store.join store a d in
+      (e, env'', store')
+
   let step_no_gc (state, ss) frame = match state with
-    | (Call (f, ae), env, store) ->
+    | (CExp (Call (f, ae)), env, store) ->
       let rands = atomic_eval f env store in
       let rator = atomic_eval ae env store in
-      List.fold_left (fun acc ((v, e), env') ->
+      List.fold_left (fun acc -> function
+        | V.Clos ((v, e), env') ->
           let a = alloc v state in
           ((StackUnchanged,
             ((e, Env.extend env' v a,
               Store.join store a rator), ss))
-           :: acc))
+           :: acc)
+        | V.Undefined -> acc)
         [] (Lattice.concretize rands)
-    | (Let (v, call, e), env, store) ->
-      let k = (v, e, env) in
-      [(StackPush k, ((Call call, env, store), (Summary.push ss k)))]
-    | (Atom ae, env, store) ->
+    | (CExp (Set (v, ae)) as cexp, env, store) ->
+      let clo = atomic_eval ae env store in
+      let addr = Env.lookup env v in
       begin match frame with
-        | Some ((_, ss'), (v, e, env')) ->
-          let a = alloc v state in
-          let env'' = Env.extend env' v a in
-          let store' = Store.join store a (atomic_eval ae env store) in
-          [(StackPop (v, e, env'), ((e, env'', store'), ss'))]
+        | Some ((_, ss'), f) ->
+          let store' = Store.join store addr clo in (* TODO: set *)
+          let state' = (cexp, env, store') in
+          [(StackPop f, (apply_kont f (Lattice.abst [V.Undefined]) state', ss'))]
         | None ->
           print_endline "No frame when popping, reached end of evaluation";
           []
       end
+    | (AExp ae, env, store) -> begin match frame with
+        | Some ((_, ss'), f) ->
+          [(StackPop f, (apply_kont f (atomic_eval ae env store) state, ss'))]
+        | None ->
+          print_endline "No frame when popping, reached end of evaluation";
+          []
+      end
+    | (Let (v, cexp, exp), env, store) ->
+      let f = (v, exp, env) in
+      [(StackPush f, ((CExp cexp, env, store), Summary.push ss f))]
 
   module ConfOrdering = struct
     type t = conf
@@ -458,12 +424,13 @@ struct
     AddressSet.union ss (addresses_of_vars (free e) env)
 
   let touch (lam, env) =
-    addresses_of_vars (free (Atom (Lambda lam))) env
+    addresses_of_vars (free (AExp (Lambda lam))) env
 
   (* Applies one step of the touching relation *)
   let touching_rel1 addr store =
-    List.fold_left (fun acc a ->
-        AddressSet.union acc (touch a))
+    List.fold_left (fun acc -> function
+      | V.Clos a -> AddressSet.union acc (touch a)
+      | V.Undefined -> acc)
       AddressSet.empty
       (Lattice.concretize (Store.lookup store addr))
 
@@ -509,9 +476,11 @@ module type BuildDSG_signature =
     val add_short : dsg -> L.conf -> L.conf -> ConfSet.t * EdgeSet.t * EpsSet.t
     val add_edge : dsg -> L.conf -> L.stack_change -> L.conf -> ConfSet.t * EdgeSet.t * EpsSet.t
     val explore : dsg -> L.conf -> ConfSet.t * EdgeSet.t * EpsSet.t
+    val output_dsg : dsg -> string -> unit
+    val output_ecg : dsg -> string -> unit
   end
 
-module BuildDSG =
+module BuildDSG : BuildDSG_signature =
   functor (L : Lang_signature) ->
   struct
     module G = Graph.Persistent.Digraph.ConcreteBidirectionalLabeled(struct
@@ -720,38 +689,15 @@ module BuildDSG =
         (ConfSet.singleton c0) EdgeSet.empty EpsSet.empty
   end
 
-(* module LNoGC = ANFStackSummary(EmptyStackSummary) *)
 module L = ANFGarbageCollected
-(* module DSG = BuildDSG(LNoGC) *)
 module DSG = BuildDSG(L)
 
 let _ =
-  (* let exp =  (L.Let ("id", (L.Lambda ("x", L.Atom (L.Var "x")),
-                              L.Lambda ("y", L.Atom (L.Var "y"))),
-                       (L.Call ((L.Lambda ("z", L.Atom (L.Var "z"))), L.Var "id")))) in
-     let dsg = DSG.build_dyck exp in *)
-  (*  let id = L.Lambda ("x", L.Atom (L.Var "x")) in
-      let y = (L.Lambda ("f", (L.Call (L.Lambda ("x", L.Let ("y", (L.Var "x", L.Var "x"),
-                                                           L.Call (L.Var "f", L.Var "y"))),
-                                     L.Lambda ("x", L.Let ("y", (L.Var "x", L.Var "x"),
-                                                           L.Call (L.Var "f", L.Var "y"))))))) in
-      let dsg = DSG.build_dyck (L.Call (y, id)) in
-  *)
-  (* let exp = (L.Let ("f", (L.Lambda ("x", L.Atom (L.Var "x")),
-                          L.Lambda ("x", L.Atom (L.Var "x"))),
-                    (L.Let ("g", (L.Lambda ("y", L.Atom (L.Var "y")),
-                                  L.Var "f"),
-                            (L.Let ("h", (L.Lambda ("z", L.Atom (L.Var "z")),
-                                          L.Var "g"),
-                                    (L.Let ("a", (L.Var "f", L.Var "g"),
-                                            (L.Call (L.Var "a", L.Var "h")))))))))) in *)
-
-  let exp = (L.Let ("f", (L.Lambda ("a", L.Atom (L.Var "a")),
-                          L.Lambda ("x", L.Atom (L.Var "x"))),
-                    (L.Let ("g", (L.Lambda ("a", L.Atom (L.Var "a")),
-                                  L.Lambda ("y", (L.Call (L.Var "f", L.Var "y")))),
-                            (L.Call (L.Var "g", L.Var "f")))))) in
-
+  let exp = let open ANFStructure in
+    Let ("f",
+         (Call ((Lambda ("x", AExp (Var "x"))), (Lambda ("x", AExp (Var "x"))))),
+         Let ("u", (Call (Var "f", Var "f")),
+              CExp (Call (Var "f", Var "u")))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
