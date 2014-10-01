@@ -291,14 +291,27 @@ struct
     env: env;
     store: store;
   }
-  type frame = var * exp * env
+  type id = lam * env
+  type frame =
+    | FLet of var * exp * env
+    | FMark of id * Lattice.t
 
-  let string_of_frame (v, e, env) = "(" ^ v ^ ", " ^ (string_of_exp e) ^ ")"
+  let create_id lam env store : id = (lam, env)
 
-  let compare_frame (v1, exp1, env1) (v2, exp2, env2) =
-    order_concat [lazy (Pervasives.compare v1 v2);
-                  lazy (Pervasives.compare exp1 exp2);
-                  lazy (Env.compare env1 env2)]
+  let string_of_frame = function
+    | FLet (v, e, env) -> Printf.sprintf "Let(%s)" v
+    | FMark _ -> Printf.sprintf "Mark"
+
+  let compare_frame x y = match x, y with
+    | FLet (v1, exp1, env1), FLet (v2, exp2, env2) ->
+      order_concat [lazy (Pervasives.compare v1 v2);
+                    lazy (Pervasives.compare exp1 exp2);
+                    lazy (Env.compare env1 env2)]
+    | FLet _, _ -> 1 | _, FLet _ -> -1
+    | FMark ((lam, env), d), FMark ((lam', env'), d') ->
+      order_concat [lazy (Pervasives.compare lam lam');
+                    lazy (Env.compare env env');
+                    lazy (Lattice.compare d d')]
 
   let compare_control x y = match x, y with
     | Exp e, Exp e' -> Pervasives.compare e e'
@@ -371,21 +384,25 @@ end
 
 module ReachableAddressesSummary =
 struct
-  module AddressSet = BatSet.Make(ANFStructure.Address)
+  open ANFStructure
+  module AddressSet = BatSet.Make(Address)
   type t = AddressSet.t
   let empty = AddressSet.empty
   let compare = AddressSet.compare
   let to_string ss = "[" ^ (String.concat ", "
-                              (BatList.map ANFStructure.Address.to_string
+                              (BatList.map Address.to_string
                                  (AddressSet.elements ss))) ^ "]"
 
-  let touch (v, e, env) =
-    StringSet.fold (fun v' acc ->
-        if v' = v then
-          acc
-        else
-          AddressSet.add (ANFStructure.Env.lookup env v') acc)
-      (ANFStructure.free e) AddressSet.empty
+  let touch = function
+    | FLet (v, e, env) ->
+      StringSet.fold (fun v' acc ->
+          if v' = v then
+            acc
+          else
+            AddressSet.add (Env.lookup env v') acc)
+        (free e) AddressSet.empty
+    | FMark (_, _) ->
+      AddressSet.empty
 
   let push ss f =
     AddressSet.union ss (touch f)
@@ -412,27 +429,31 @@ struct
      Summary.empty)
 
   let apply_kont f d state = match f with
-    | (v, e, env') ->
+    | FLet (v, e, env') ->
       let a = alloc v state in
       let env'' = Env.extend env' v a in
       let store' = Store.join state.store a d in
       {store = store'; env = env''; control = Exp e}
+    | FMark (id, d) ->
+      state
 
   let step_no_gc (state, ss) frame = match state.control with
     | Exp (CExp (Call (f, ae))) ->
       Printf.printf "Call\n%!";
-      let rands = atomic_eval f state.env state.store in
-      let rator = atomic_eval ae state.env state.store in
+      let rator = atomic_eval f state.env state.store in
+      let rand = atomic_eval ae state.env state.store in
       List.fold_left (fun acc -> function
           | V.Clos ((v, e), env') ->
             let a = alloc v state in
-            ((StackUnchanged,
+            let id = create_id (v, e) state.env state.store in
+            let f = FMark (id, rand) in
+            ((StackPush f,
               ({control = Exp e;
                 env = Env.extend env' v a;
-                store = Store.join state.store a rator}, ss))
+                store = Store.join state.store a rand}, ss))
              :: acc)
           | V.Undefined | V.Int _ -> acc)
-        [] (Lattice.concretize rands)
+        [] (Lattice.concretize rator)
     | Exp (CExp (Set (v, ae))) ->
       let clo = atomic_eval ae state.env state.store in
       let addr = Env.lookup state.env v in
@@ -445,14 +466,13 @@ struct
       [(StackUnchanged, ({state with control = Val v}, ss))]
     | Exp (Let (v, cexp, exp)) ->
       Printf.printf "Let\n%!";
-      let f = (v, exp, state.env) in
+      let f = FLet (v, exp, state.env) in
       [(StackPush f, ({state with control = Exp (CExp cexp)}, Summary.push ss f))]
     | Val v -> Printf.printf "Val: %s\n%!" (Lattice.to_string v);
       begin match frame with
         | Some ((_, ss'), f) ->
           [(StackPop f, (apply_kont f v state, ss'))]
         | None ->
-          print_endline "No frame when popping, reached end of evaluation";
           []
       end
 
