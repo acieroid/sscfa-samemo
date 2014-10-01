@@ -252,7 +252,7 @@ struct
   module Address = IntegerAddress
   type addr = Address.t
 
-  module Env = MapEnv(IntegerAddress)
+  module Env = MapEnv(Address)
   type env = Env.t
 
   type clo = lam * env
@@ -282,6 +282,27 @@ struct
   module Lattice = SetLattice(V)
   module Store = MapStore(Lattice)(Address)
 
+  type id = lam * env
+  module ProcIdOrdering = struct
+    type t = id
+    let compare (lam, env) (lam', env') =
+      order_concat [lazy (Pervasives.compare lam lam');
+                    lazy (Env.compare env env')]
+  end
+  module ProcIdMap = BatMap.Make(ProcIdOrdering)
+  module ProcIdSet = BatSet.Make(ProcIdOrdering)
+
+  module ValueTable = BatMap.Make(V)
+  type table =
+    | Impure
+    | Poly
+    | Table of V.t ValueTable.t
+  type memo = table ProcIdMap.t
+  let memo_empty : memo = ProcIdMap.empty
+  module AddressMap = BatMap.Make(Address)
+  type reads = ProcIdSet.t AddressMap.t
+  let reads_empty : reads = AddressMap.empty
+
   type store = Store.t
   type control =
     | Exp of exp
@@ -290,8 +311,9 @@ struct
     control: control;
     env: env;
     store: store;
+    memo: memo;
+    reads: reads;
   }
-  type id = lam * env
   type frame =
     | FLet of var * exp * env
     | FMark of id * Lattice.t
@@ -425,7 +447,8 @@ struct
     (Summary.to_string ss)
 
   let inject e =
-    ({control = Exp e; env = Env.empty; store = Store.empty},
+    ({control = Exp e; env = Env.empty; store = Store.empty;
+      memo = memo_empty; reads = reads_empty},
      Summary.empty)
 
   let apply_kont f d state = match f with
@@ -433,7 +456,7 @@ struct
       let a = alloc v state in
       let env'' = Env.extend env' v a in
       let store' = Store.join state.store a d in
-      {store = store'; env = env''; control = Exp e}
+      {state with store = store'; env = env''; control = Exp e}
     | FMark (id, d) ->
       state
 
@@ -448,9 +471,9 @@ struct
             let id = create_id (v, e) state.env state.store in
             let f = FMark (id, rand) in
             ((StackPush f,
-              ({control = Exp e;
-                env = Env.extend env' v a;
-                store = Store.join state.store a rand}, ss))
+              ({state with control = Exp e;
+                           env = Env.extend env' v a;
+                           store = Store.join state.store a rand}, ss))
              :: acc)
           | V.Undefined | V.Int _ -> acc)
         [] (Lattice.concretize rator)
