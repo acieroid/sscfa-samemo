@@ -77,11 +77,19 @@ sig
   (** Concretize a lattice values into a list of possible values if possible
       (can raise a TooAbstracted exception) *)
   val concretize : t -> elt list
+  (** String representation of a lattice value *)
+  val to_string : t -> string
 end
 
-module SetLattice : functor (V : BatInterfaces.OrderedType)
+module type LatticeArg = sig
+  type t
+  val compare : t -> t -> int
+  val to_string : t -> string
+end
+
+module SetLattice : functor (V : LatticeArg)
   -> Lattice_signature with type elt = V.t =
-  functor (V : BatInterfaces.OrderedType) ->
+  functor (V : LatticeArg) ->
   struct
     module VSet = BatSet.Make(V)
     type elt = V.t
@@ -103,6 +111,10 @@ module SetLattice : functor (V : BatInterfaces.OrderedType)
       | Top, _ -> 1
       | _, Top -> -1
       | Set a, Set b -> VSet.compare a b
+    let to_string = function
+      | Top -> "Top"
+      | Set s -> String.concat "|"
+                   (VSet.fold (fun v acc -> (V.to_string v) :: acc) s [])
   end
 
 module type Store_signature =
@@ -195,6 +207,7 @@ struct
   and aexp =
     | Var of var
     | Lambda of lam
+    | Int of int
   and cexp =
     | Call of aexp * aexp
     | Set of var * aexp
@@ -216,6 +229,7 @@ struct
   and free_aexp = function
     | Var v -> StringSet.singleton v
     | Lambda (v, exp) -> StringSet.remove v (free exp)
+    | Int _ -> StringSet.empty
 
   let rec string_of_exp = function
     | Let (v, cexp, exp) ->
@@ -232,6 +246,8 @@ struct
     | Var v -> v
     | Lambda (v, e) ->
       Printf.sprintf "(lambda (%s) %s)" v (string_of_exp e)
+    | Int n ->
+      string_of_int n
 
   module Address = IntegerAddress
   type addr = Address.t
@@ -248,18 +264,33 @@ struct
   module V = struct
     type t =
       | Clos of clo
+      | Int of int
       | Undefined
     let compare x y = match x, y with
       | Clos c, Clos c' -> compare_clo c c'
       | Clos _, _ -> 1
       | _, Clos _ -> -1
+      | Int n, Int n' -> Pervasives.compare n n'
+      | Int _, _ -> 1
+      | _, Int _ -> -1
       | Undefined, Undefined -> 0
+    let to_string = function
+      | Clos _ -> "<clos>"
+      | Int n -> string_of_int n
+      | Undefined -> "<undefined>"
   end
   module Lattice = SetLattice(V)
   module Store = MapStore(Lattice)(Address)
 
   type store = Store.t
-  type state = exp * env * store
+  type control =
+    | Exp of exp
+    | Val of Lattice.t
+  type state = {
+    control: control;
+    env: env;
+    store: store;
+  }
   type frame = var * exp * env
 
   let string_of_frame (v, e, env) = "(" ^ v ^ ", " ^ (string_of_exp e) ^ ")"
@@ -269,11 +300,22 @@ struct
                   lazy (Pervasives.compare exp1 exp2);
                   lazy (Env.compare env1 env2)]
 
-  let compare_state (exp1, env1, store1) (exp2, env2, store2) =
+  let compare_control x y = match x, y with
+    | Exp e, Exp e' -> Pervasives.compare e e'
+    | Exp _, _ -> 1
+    | _, Exp _ -> -1
+    | Val v, Val v' -> Lattice.compare v v'
+  let string_of_control = function
+    | Exp e -> string_of_exp e
+    | Val v -> Lattice.to_string v
+
+  let compare_state state state' =
     order_concat
-      [lazy (Pervasives.compare exp1 exp2);
-       lazy (Env.compare env1 env2);
-       lazy (Store.compare store1 store2)]
+      [lazy (compare_control state.control state'.control);
+       lazy (Env.compare state.env state'.env);
+       lazy (Store.compare state.store state'.store)]
+  let string_of_state state =
+    string_of_control state.control
 
   type stack_change =
     | StackPop of frame
@@ -307,9 +349,10 @@ struct
   let atomic_eval atom env store = match atom with
     | Var var -> Store.lookup store (Env.lookup env var)
     | Lambda lam -> Lattice.abst [V.Clos (lam, env)]
+    | Int n -> Lattice.abst [V.Int n]
 
-  let alloc v state = match state with
-    | (_, _, store) -> Address.alloc (Store.size store + 1)
+  let alloc v state =
+    Address.alloc (Store.size state.store + 1)
 end
 
 
@@ -360,55 +403,58 @@ struct
     order_concat [lazy (compare_state s1 s2);
                   lazy (Summary.compare ss1 ss2)]
 
-  let string_of_conf ((e, _, _), ss) = (string_of_exp e) ^ " " ^
-                                       (Summary.to_string ss)
+  let string_of_conf (state, ss) =
+    (string_of_state state) ^ " " ^
+    (Summary.to_string ss)
 
   let inject e =
-    ((e, Env.empty, Store.empty), Summary.empty)
+    ({control = Exp e; env = Env.empty; store = Store.empty},
+     Summary.empty)
 
   let apply_kont f d state = match f with
     | (v, e, env') ->
       let a = alloc v state in
       let env'' = Env.extend env' v a in
-      let (_, _, store) = state in
-      let store' = Store.join store a d in
-      (e, env'', store')
+      let store' = Store.join state.store a d in
+      {store = store'; env = env''; control = Exp e}
 
-  let step_no_gc (state, ss) frame = match state with
-    | (CExp (Call (f, ae)), env, store) ->
-      let rands = atomic_eval f env store in
-      let rator = atomic_eval ae env store in
+  let step_no_gc (state, ss) frame = match state.control with
+    | Exp (CExp (Call (f, ae))) ->
+      Printf.printf "Call\n%!";
+      let rands = atomic_eval f state.env state.store in
+      let rator = atomic_eval ae state.env state.store in
       List.fold_left (fun acc -> function
-        | V.Clos ((v, e), env') ->
-          let a = alloc v state in
-          ((StackUnchanged,
-            ((e, Env.extend env' v a,
-              Store.join store a rator), ss))
-           :: acc)
-        | V.Undefined -> acc)
+          | V.Clos ((v, e), env') ->
+            let a = alloc v state in
+            ((StackUnchanged,
+              ({control = Exp e;
+                env = Env.extend env' v a;
+                store = Store.join state.store a rator}, ss))
+             :: acc)
+          | V.Undefined | V.Int _ -> acc)
         [] (Lattice.concretize rands)
-    | (CExp (Set (v, ae)) as cexp, env, store) ->
-      let clo = atomic_eval ae env store in
-      let addr = Env.lookup env v in
+    | Exp (CExp (Set (v, ae))) ->
+      let clo = atomic_eval ae state.env state.store in
+      let addr = Env.lookup state.env v in
+      let store' = Store.join state.store addr clo in (* TODO: set *)
+      let v = Lattice.abst [V.Undefined] in
+      [(StackUnchanged, ({state with control = Val v; store = store'}, ss))]
+    | Exp (AExp ae) ->
+      Printf.printf "Atomic: %s\n%!" (string_of_aexp ae);
+      let v = atomic_eval ae state.env state.store in
+      [(StackUnchanged, ({state with control = Val v}, ss))]
+    | Exp (Let (v, cexp, exp)) ->
+      Printf.printf "Let\n%!";
+      let f = (v, exp, state.env) in
+      [(StackPush f, ({state with control = Exp (CExp cexp)}, Summary.push ss f))]
+    | Val v -> Printf.printf "Val: %s\n%!" (Lattice.to_string v);
       begin match frame with
         | Some ((_, ss'), f) ->
-          let store' = Store.join store addr clo in (* TODO: set *)
-          let state' = (cexp, env, store') in
-          [(StackPop f, (apply_kont f (Lattice.abst [V.Undefined]) state', ss'))]
+          [(StackPop f, (apply_kont f v state, ss'))]
         | None ->
           print_endline "No frame when popping, reached end of evaluation";
           []
       end
-    | (AExp ae, env, store) -> begin match frame with
-        | Some ((_, ss'), f) ->
-          [(StackPop f, (apply_kont f (atomic_eval ae env store) state, ss'))]
-        | None ->
-          print_endline "No frame when popping, reached end of evaluation";
-          []
-      end
-    | (Let (v, cexp, exp), env, store) ->
-      let f = (v, exp, env) in
-      [(StackPush f, ((CExp cexp, env, store), Summary.push ss f))]
 
   module ConfOrdering = struct
     type t = conf
@@ -420,8 +466,9 @@ struct
         AddressSet.add (Env.lookup env v) acc)
       vars AddressSet.empty
 
-  let root (((e, env, store), ss) : conf) =
-    AddressSet.union ss (addresses_of_vars (free e) env)
+  let root ((state, ss) : conf) = match state.control with
+    | Exp e -> AddressSet.union ss (addresses_of_vars (free e) state.env)
+    | Val _ -> ss
 
   let touch (lam, env) =
     addresses_of_vars (free (AExp (Lambda lam))) env
@@ -429,8 +476,8 @@ struct
   (* Applies one step of the touching relation *)
   let touching_rel1 addr store =
     List.fold_left (fun acc -> function
-      | V.Clos a -> AddressSet.union acc (touch a)
-      | V.Undefined -> acc)
+        | V.Clos a -> AddressSet.union acc (touch a)
+        | V.Undefined | V.Int _ -> acc)
       AddressSet.empty
       (Lattice.concretize (Store.lookup store addr))
 
@@ -451,16 +498,18 @@ struct
     aux (AddressSet.singleton addr) AddressSet.empty
 
   let reachable (conf : conf) =
-    let ((_, _, store), _) = conf in
+    let (state, _) = conf in
     AddressSet.fold (fun a acc ->
-        AddressSet.union acc (touching_rel a store))
+        AddressSet.union acc (touching_rel a state.store))
       (root conf) AddressSet.empty
 
-  let gc conf =
-    let ((exp, env, store), ss) = conf in
-    ((exp, env, Store.restrict store (AddressSet.to_list (reachable conf))), ss)
+  let gc ((state, ss) as conf) =
+    ({state with store = Store.restrict state.store (AddressSet.to_list
+                                                       (reachable conf))},
+     ss)
 
-  let step conf = step_no_gc (gc conf)
+  let step conf =
+    step_no_gc (gc conf)
 
 end
 
@@ -696,8 +745,8 @@ let _ =
   let exp = let open ANFStructure in
     Let ("f",
          (Call ((Lambda ("x", AExp (Var "x"))), (Lambda ("x", AExp (Var "x"))))),
-         Let ("u", (Call (Var "f", Var "f")),
-              CExp (Call (Var "f", Var "u")))) in
+         Let ("u", (Call (Var "f", Int 1)),
+              CExp (Call (Var "f", Int 2)))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
