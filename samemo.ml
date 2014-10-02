@@ -506,23 +506,39 @@ struct
       List.fold_left (fun acc -> function
           | V.Clos ((v, e), env') ->
             let a = alloc v state in
-            let id = create_id (v, e) state.env state.store in
-            let f = FMark (id, rand) in
-            ((StackPush f,
-              ({control = Exp e;
-                env = Env.extend env' v a;
-                store = Store.join state.store a rand;
-                memo = update_memo state.memo (ProcIdSet.union ids ids');
-                reads = update_reads state.reads (AddressSet.union addrs addrs')
-                    (Summary.marked ss)}, ss))
-             :: acc)
+            (* TODO: don't call create_id anywhere else than in the atomic evaluator *)
+            let id = create_id (v, e) env' state.store in
+            let memo' =  update_memo state.memo (ProcIdSet.union ids ids') in
+            let reads' = update_reads state.reads
+                (AddressSet.union addrs addrs') (Summary.marked ss) in
+            let cached = match ProcIdMap.find id state.memo with
+              | Table table ->
+                begin try Some (ValueTable.find rand table)
+                  with Not_found -> None
+                end
+              | Impure | Poly -> None
+              | exception Not_found -> None in
+            begin match cached with
+              | None ->
+                let f = FMark (id, rand) in
+                (StackPush f,
+                 ({control = Exp e;
+                   env = Env.extend env' v a;
+                   store = Store.join state.store a rand;
+                   memo = memo';
+                   reads = reads'}, ss)) :: acc
+              | Some d ->
+                (StackUnchanged, ({state with control = Val d;
+                                              memo = memo';
+                                              reads = reads'}, ss)) :: acc
+            end
           | V.Undefined | V.Int _ -> acc)
         [] (Lattice.concretize rator)
     | Exp (CExp (Set (v, ae))) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
       List.fold_left (fun acc -> function
-          | V.Clos ((var, exp), _) ->
-            let id = create_id (var, exp) state.env state.store in
+          | V.Clos ((var, exp), env') ->
+            let id = create_id (var, exp) env' state.store in
             let addr = Env.lookup state.env v in
             let store' = Store.join state.store addr clo in (* TODO: set *)
             let v = Lattice.abst [V.Undefined] in
@@ -536,18 +552,15 @@ struct
                                               (Summary.marked ss)}, ss)) :: acc
           | _ -> acc) [] (Lattice.concretize clo)
     | Exp (AExp ae) ->
-      Printf.printf "Atomic: %s\n%!" (string_of_aexp ae);
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
       [(StackUnchanged, ({state with control = Val clo;
                                      memo = update_memo state.memo ids;
                                      reads = update_reads state.reads addrs
                                          (Summary.marked ss)}, ss))]
     | Exp (Let (v, cexp, exp)) ->
-      Printf.printf "Let\n%!";
       let f = FLet (v, exp, state.env) in
       [(StackPush f, ({state with control = Exp (CExp cexp)}, Summary.push ss f))]
-    | Val v -> Printf.printf "Val: %s\n%!" (Lattice.to_string v);
-      begin match frame with
+    | Val v -> begin match frame with
         | Some ((_, ss'), f) ->
           [(StackPop f, (apply_kont f v state, ss'))]
         | None ->
@@ -801,12 +814,8 @@ module BuildDSG : BuildDSG_signature =
       let i = ref 0 in
       let rec loop dsg ds de dh =
         i := !i + 1;
-        (* output_dsg dsg ("/tmp/dsg/dsg-" ^ (string_of_int !i) ^ ".dot"); *)
-        (* output_ecg dsg ("/tmp/dsg/ecg-" ^ (string_of_int !i) ^ ".dot"); *)
         if not (EpsSet.is_empty dh) then
           let c, c' = EpsSet.choose dh in
-          print_string ("eps: " ^ (L.string_of_conf c) ^ " -> " ^ (L.string_of_conf c'));
-          print_newline ();
           let (ds', de', dh') = add_short dsg c c' in
           loop { dsg with ecg = G.add_edge dsg.ecg c c' }
             (ConfSet.union ds ds')
@@ -814,8 +823,6 @@ module BuildDSG : BuildDSG_signature =
             (EpsSet.remove (c, c') (EpsSet.union dh dh'))
         else if not (EdgeSet.is_empty de) then
           let c, g, c' = EdgeSet.choose de in
-          print_string ("edge: " ^ (L.string_of_conf c) ^ " -> " ^ (L.string_of_conf c'));
-          print_newline ();
           let (ds', de', dh') = add_edge dsg c g c' in
           loop { dsg with g = G.add_edge_e dsg.g (c, g, c') }
             (ConfSet.union ds ds')
@@ -823,8 +830,6 @@ module BuildDSG : BuildDSG_signature =
             (EpsSet.union dh dh')
         else if not (ConfSet.is_empty ds) then
           let c = ConfSet.choose ds in
-          print_string ("conf: " ^ (L.string_of_conf c));
-          print_newline ();
           let (ds', de', dh') = explore dsg c in
           loop { dsg with g = G.add_vertex dsg.g c; ecg = G.add_vertex dsg.ecg c }
             (ConfSet.remove c (ConfSet.union ds ds'))
@@ -844,7 +849,7 @@ let _ =
     Let ("f",
          (Call ((Lambda ("x", AExp (Var "x"))), (Lambda ("x", AExp (Var "x"))))),
          Let ("u", (Call (Var "f", Int 1)),
-              CExp (Call (Var "f", Int 2)))) in
+              CExp (Call (Var "f", Int 1)))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
