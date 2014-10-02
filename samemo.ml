@@ -198,6 +198,9 @@ sig
       configuration. Returns the successor configurations with the corresponding
       changes to the stack *)
   val step : conf -> (conf * frame) option -> (stack_change * conf) list
+
+  (** Associate a color with a configuration. Used for displaying the graph *)
+  val conf_color : conf -> int
 end
 
 module ANFStructure =
@@ -460,8 +463,7 @@ struct
                   lazy (Summary.compare ss1 ss2)]
 
   let string_of_conf (state, ss) =
-    (string_of_state state) ^ " " ^
-    (Summary.to_string ss)
+    (string_of_state state)
 
   let inject e =
     ({control = Exp e; env = Env.empty; store = Store.empty;
@@ -622,6 +624,9 @@ struct
   let step conf =
     step_no_gc (gc conf)
 
+  let conf_color (state, _) = match state.control with
+    | Exp _ -> 0xFFDDDD
+    | Val _ -> 0xDDFFDD
 end
 
 module type BuildDSG_signature =
@@ -677,7 +682,9 @@ module BuildDSG : BuildDSG_signature =
       let vertex_name (state : V.t) =
         (string_of_int (node_id state))
       let vertex_attributes (state : V.t) =
-        [`Label (L.string_of_conf state)]
+        [`Label (L.string_of_conf state);
+         `Style `Filled;
+         `Fillcolor (L.conf_color state)]
       let default_vertex_attributes _ = []
       let graph_attributes _ = []
     end
