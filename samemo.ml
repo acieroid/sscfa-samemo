@@ -251,6 +251,7 @@ struct
 
   module Address = IntegerAddress
   type addr = Address.t
+  module AddressSet = BatSet.Make(Address)
 
   module Env = MapEnv(Address)
   type env = Env.t
@@ -381,15 +382,19 @@ struct
     let compare = compare_stack_change
   end
 
-  let atomic_eval atom env store = match atom with
-    | Var var -> Store.lookup store (Env.lookup env var)
-    | Lambda lam -> Lattice.abst [V.Clos (lam, env)]
-    | Int n -> Lattice.abst [V.Int n]
+  let atomic_eval atom env store =
+    match atom with
+    | Var var ->
+      let a = Env.lookup env var in
+      Store.lookup store a
+    | Lambda lam ->
+      Lattice.abst [V.Clos (lam, env)]
+    | Int n ->
+      Lattice.abst [V.Int n]
 
   let alloc v state =
     Address.alloc (Store.size state.store + 1)
 end
-
 
 module type StackSummary =
 sig
@@ -402,18 +407,22 @@ sig
   val to_string : t -> string
   (** Add information related to a new frame in the stack summary *)
   val push : t -> ANFStructure.frame -> t
+  (** Set of addresses reachable from the stack summary *)
+  val reachable : t -> ANFStructure.AddressSet.t
 end
 
-module ReachableAddressesSummary =
+module ReachableAddressesAndMarksSummary : StackSummary =
 struct
   open ANFStructure
-  module AddressSet = BatSet.Make(Address)
-  type t = AddressSet.t
-  let empty = AddressSet.empty
-  let compare = AddressSet.compare
-  let to_string ss = "[" ^ (String.concat ", "
-                              (BatList.map Address.to_string
-                                 (AddressSet.elements ss))) ^ "]"
+  type t = AddressSet.t * ProcIdSet.t
+  let empty = (AddressSet.empty, ProcIdSet.empty)
+  let compare (addrs, procids) (addrs', procids') =
+    order_concat [lazy (AddressSet.compare addrs addrs');
+                  lazy (ProcIdSet.compare procids procids')]
+  let to_string (addrs, procids) =
+    "[" ^ (String.concat ", "
+             (BatList.map Address.to_string
+                (AddressSet.elements addrs))) ^ "]"
 
   let touch = function
     | FLet (v, e, env) ->
@@ -426,16 +435,19 @@ struct
     | FMark (_, _) ->
       AddressSet.empty
 
-  let push ss f =
-    AddressSet.union ss (touch f)
+  let push (addrs, procids) f =
+    (AddressSet.union addrs (touch f),
+     match f with
+     | FMark (id, _) -> ProcIdSet.add id procids
+     | _ -> procids)
+
+  let reachable (addrs, _) = addrs
 end
 
 module ANFGarbageCollected : Lang_signature with type exp = ANFStructure.exp =
 struct
   include ANFStructure
-
-  module AddressSet = BatSet.Make(Address)
-  module Summary = ReachableAddressesSummary
+  module Summary = ReachableAddressesAndMarksSummary
   type conf = state * Summary.t
 
   let compare_conf (s1, ss1) (s2, ss2) =
@@ -485,8 +497,8 @@ struct
       [(StackUnchanged, ({state with control = Val v; store = store'}, ss))]
     | Exp (AExp ae) ->
       Printf.printf "Atomic: %s\n%!" (string_of_aexp ae);
-      let v = atomic_eval ae state.env state.store in
-      [(StackUnchanged, ({state with control = Val v}, ss))]
+      let clo = atomic_eval ae state.env state.store in
+      [(StackUnchanged, ({state with control = Val clo}, ss))]
     | Exp (Let (v, cexp, exp)) ->
       Printf.printf "Let\n%!";
       let f = FLet (v, exp, state.env) in
@@ -510,8 +522,8 @@ struct
       vars AddressSet.empty
 
   let root ((state, ss) : conf) = match state.control with
-    | Exp e -> AddressSet.union ss (addresses_of_vars (free e) state.env)
-    | Val _ -> ss
+    | Exp e -> AddressSet.union (Summary.reachable ss) (addresses_of_vars (free e) state.env)
+    | Val _ -> Summary.reachable ss
 
   let touch (lam, env) =
     addresses_of_vars (free (AExp (Lambda lam))) env
