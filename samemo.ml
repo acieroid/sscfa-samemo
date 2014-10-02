@@ -293,11 +293,11 @@ struct
   module ProcIdMap = BatMap.Make(ProcIdOrdering)
   module ProcIdSet = BatSet.Make(ProcIdOrdering)
 
-  module ValueTable = BatMap.Make(V)
+  module ValueTable = BatMap.Make(Lattice)
   type table =
     | Impure
     | Poly
-    | Table of V.t ValueTable.t
+    | Table of Lattice.t ValueTable.t
   type memo = table ProcIdMap.t
   let memo_empty : memo = ProcIdMap.empty
   module AddressMap = BatMap.Make(Address)
@@ -386,11 +386,12 @@ struct
     match atom with
     | Var var ->
       let a = Env.lookup env var in
-      Store.lookup store a
+      (Store.lookup store a, AddressSet.singleton a, ProcIdSet.empty)
     | Lambda lam ->
-      Lattice.abst [V.Clos (lam, env)]
+      (Lattice.abst [V.Clos (lam, env)], AddressSet.empty,
+       ProcIdSet.singleton (create_id lam env store))
     | Int n ->
-      Lattice.abst [V.Int n]
+      (Lattice.abst [V.Int n], AddressSet.empty, ProcIdSet.empty)
 
   let alloc v state =
     Address.alloc (Store.size state.store + 1)
@@ -409,6 +410,8 @@ sig
   val push : t -> ANFStructure.frame -> t
   (** Set of addresses reachable from the stack summary *)
   val reachable : t -> ANFStructure.AddressSet.t
+  (** Set of marked procedures stored in the stack summary *)
+  val marked : t -> ANFStructure.ProcIdSet.t
 end
 
 module ReachableAddressesAndMarksSummary : StackSummary =
@@ -442,6 +445,8 @@ struct
      | _ -> procids)
 
   let reachable (addrs, _) = addrs
+
+  let marked (_, procids) = procids
 end
 
 module ANFGarbageCollected : Lang_signature with type exp = ANFStructure.exp =
@@ -469,36 +474,74 @@ struct
       let env'' = Env.extend env' v a in
       let store' = Store.join state.store a d in
       {state with store = store'; env = env''; control = Exp e}
-    | FMark (id, d) ->
-      state
+    | FMark (id, d_arg) ->
+      {state with memo = match ProcIdMap.find id state.memo with
+           | Table table ->
+             ProcIdMap.add id (Table (ValueTable.add d_arg d table)) state.memo
+           | exception Not_found ->
+             ProcIdMap.add id (Table (ValueTable.add d_arg d ValueTable.empty)) state.memo
+           | Impure | Poly -> state.memo}
+
+  let update_memo memo ids =
+    ProcIdSet.fold (fun id acc ->
+        if ProcIdMap.mem id acc then
+          ProcIdMap.add id Poly acc
+        else
+          acc) ids memo
+
+  let update_reads reads addrs marked =
+    AddressSet.fold (fun addr acc ->
+        AddressMap.add addr (ProcIdSet.union marked
+                               (if AddressMap.mem addr acc then
+                                  AddressMap.find addr acc
+                                else
+                                  ProcIdSet.empty)) acc)
+      addrs reads
 
   let step_no_gc (state, ss) frame = match state.control with
     | Exp (CExp (Call (f, ae))) ->
       Printf.printf "Call\n%!";
-      let rator = atomic_eval f state.env state.store in
-      let rand = atomic_eval ae state.env state.store in
+      let (rator, addrs, ids) = atomic_eval f state.env state.store in
+      let (rand, addrs', ids') = atomic_eval ae state.env state.store in
       List.fold_left (fun acc -> function
           | V.Clos ((v, e), env') ->
             let a = alloc v state in
             let id = create_id (v, e) state.env state.store in
             let f = FMark (id, rand) in
             ((StackPush f,
-              ({state with control = Exp e;
-                           env = Env.extend env' v a;
-                           store = Store.join state.store a rand}, ss))
+              ({control = Exp e;
+                env = Env.extend env' v a;
+                store = Store.join state.store a rand;
+                memo = update_memo state.memo (ProcIdSet.union ids ids');
+                reads = update_reads state.reads (AddressSet.union addrs addrs')
+                    (Summary.marked ss)}, ss))
              :: acc)
           | V.Undefined | V.Int _ -> acc)
         [] (Lattice.concretize rator)
     | Exp (CExp (Set (v, ae))) ->
-      let clo = atomic_eval ae state.env state.store in
-      let addr = Env.lookup state.env v in
-      let store' = Store.join state.store addr clo in (* TODO: set *)
-      let v = Lattice.abst [V.Undefined] in
-      [(StackUnchanged, ({state with control = Val v; store = store'}, ss))]
+      let (clo, addrs, ids) = atomic_eval ae state.env state.store in
+      List.fold_left (fun acc -> function
+          | V.Clos ((var, exp), _) ->
+            let id = create_id (var, exp) state.env state.store in
+            let addr = Env.lookup state.env v in
+            let store' = Store.join state.store addr clo in (* TODO: set *)
+            let v = Lattice.abst [V.Undefined] in
+            let reads_ids = (AddressMap.find addr state.reads) in
+            let memo' = update_memo state.memo ids |>
+                        ProcIdMap.add id Impure |>
+                        ProcIdMap.filter (fun id _ -> not (ProcIdSet.mem id reads_ids)) in
+            (StackUnchanged, ({state with control = Val v; store = store';
+                                          memo = memo';
+                                          reads = update_reads state.reads addrs
+                                              (Summary.marked ss)}, ss)) :: acc
+          | _ -> acc) [] (Lattice.concretize clo)
     | Exp (AExp ae) ->
       Printf.printf "Atomic: %s\n%!" (string_of_aexp ae);
-      let clo = atomic_eval ae state.env state.store in
-      [(StackUnchanged, ({state with control = Val clo}, ss))]
+      let (clo, addrs, ids) = atomic_eval ae state.env state.store in
+      [(StackUnchanged, ({state with control = Val clo;
+                                     memo = update_memo state.memo ids;
+                                     reads = update_reads state.reads addrs
+                                         (Summary.marked ss)}, ss))]
     | Exp (Let (v, cexp, exp)) ->
       Printf.printf "Let\n%!";
       let f = FLet (v, exp, state.env) in
