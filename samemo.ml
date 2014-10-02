@@ -217,11 +217,14 @@ struct
     | Set of var * aexp
   and exp =
     | Let of var * cexp *  exp
+    | LetRec of var * cexp * exp
     | CExp of cexp
     | AExp of aexp
 
   let rec free = function
     | Let (v, cexp, exp) ->
+      StringSet.union (free_cexp cexp) (StringSet.remove v (free exp))
+    | LetRec (v, cexp, exp) ->
       StringSet.remove v (StringSet.union (free_cexp cexp) (free exp))
     | AExp ae -> free_aexp ae
     | CExp ce -> free_cexp ce
@@ -238,6 +241,9 @@ struct
   let rec string_of_exp = function
     | Let (v, cexp, exp) ->
       Printf.sprintf "(let ((%s %s)) %s)"
+        v (string_of_cexp cexp) (string_of_exp exp)
+    | LetRec (v, cexp, exp) ->
+      Printf.sprintf "(letrec ((%s %s)) %s)"
         v (string_of_cexp cexp) (string_of_exp exp)
     | CExp ce -> string_of_cexp ce
     | AExp ae -> string_of_aexp ae
@@ -324,20 +330,28 @@ struct
   }
   type frame =
     | FLet of var * exp * env
+    | FLetRec of Address.t * var * exp * env
     | FMark of id * Lattice.t
 
   let create_id lam env store : id = (lam, env)
 
   let string_of_frame = function
     | FLet (v, e, env) -> Printf.sprintf "Let(%s)" v
+    | FLetRec (a, v, e, env) -> Printf.sprintf "LetRec(%s)" v
     | FMark _ -> Printf.sprintf "Mark"
 
   let compare_frame x y = match x, y with
-    | FLet (v1, exp1, env1), FLet (v2, exp2, env2) ->
-      order_concat [lazy (Pervasives.compare v1 v2);
-                    lazy (Pervasives.compare exp1 exp2);
-                    lazy (Env.compare env1 env2)]
+    | FLet (v, exp, env), FLet (v', exp', env') ->
+      order_concat [lazy (Pervasives.compare v v');
+                    lazy (Pervasives.compare exp exp');
+                    lazy (Env.compare env env')]
     | FLet _, _ -> 1 | _, FLet _ -> -1
+    | FLetRec (a, v, exp, env), FLetRec (a', v', exp', env') ->
+      order_concat [lazy (Address.compare a a');
+                    lazy (Pervasives.compare v v');
+                    lazy (Pervasives.compare exp exp');
+                    lazy (Env.compare env env')]
+    | FLetRec _, _ -> 1 | _, FLetRec _ -> -1
     | FMark ((lam, env), d), FMark ((lam', env'), d') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env');
@@ -446,6 +460,13 @@ struct
           else
             AddressSet.add (Env.lookup env v') acc)
         (free e) AddressSet.empty
+    | FLetRec (a, v, e, env) ->
+      AddressSet.add a (StringSet.fold (fun v' acc ->
+          if v' = v then
+            acc
+          else
+            AddressSet.add (Env.lookup env v') acc)
+        (free e) AddressSet.empty)
     | FMark (_, _) ->
       AddressSet.empty
 
@@ -484,6 +505,9 @@ struct
       let env'' = Env.extend env' v a in
       let store' = Store.join state.store a d in
       {state with store = store'; env = env''; control = Exp e}
+    | FLetRec (a, v, e, env') ->
+      let store' = Store.join state.store a d in (* TODO: set *)
+      {state with store = store'; control = Exp e}
     | FMark (id, d_arg) ->
       {state with memo = match ProcIdMap.find id state.memo with
            | Table table ->
@@ -570,6 +594,13 @@ struct
     | Exp (Let (v, cexp, exp)) ->
       let f = FLet (v, exp, state.env) in
       [(StackPush f, ({state with control = Exp (CExp cexp)}, Summary.push ss f))]
+    | Exp (LetRec (v, cexp, exp)) ->
+      let a = alloc v state in
+      let env' = Env.extend state.env v a in
+      let store' = Store.join state.store a (Lattice.abst [V.Undefined]) in
+      let f = FLetRec (a, v, exp, env') in
+      [(StackUnchanged, ({state with control = Exp (CExp cexp);
+                                     env = env'; store = store'}, Summary.push ss f))]
     | Val v -> begin match frame with
         | Some ((_, ss'), f) ->
           [(StackPop f, (apply_kont f v state, ss'))]
@@ -864,7 +895,7 @@ let _ =
     Let ("f",
          (Call ((Lambda ("x", AExp (Var "x"))), (Lambda ("x", AExp (Var "x"))))),
          Let ("u", (Call (Var "f", Int 1)),
-              CExp (Call (Var "f", Int 1)))) in
+              CExp (Call (Var "f", Int 3)))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
