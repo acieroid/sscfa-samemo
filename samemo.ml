@@ -211,6 +211,7 @@ struct
     | Var of var
     | Lambda of lam
     | Int of int
+    | True | False
   and cexp =
     | Call of aexp * aexp
     | Set of var * aexp
@@ -232,7 +233,7 @@ struct
   and free_aexp = function
     | Var v -> StringSet.singleton v
     | Lambda (v, exp) -> StringSet.remove v (free exp)
-    | Int _ -> StringSet.empty
+    | Int _ | True | False -> StringSet.empty
 
   let rec string_of_exp = function
     | Let (v, cexp, exp) ->
@@ -251,6 +252,8 @@ struct
       Printf.sprintf "(lambda (%s) %s)" v (string_of_exp e)
     | Int n ->
       string_of_int n
+    | True -> "#t"
+    | False -> "#f"
 
   module Address = IntegerAddress
   type addr = Address.t
@@ -268,19 +271,20 @@ struct
   module V = struct
     type t =
       | Clos of clo
-      | Int of int
+      | Num
+      | True
+      | False
       | Undefined
     let compare x y = match x, y with
       | Clos c, Clos c' -> compare_clo c c'
       | Clos _, _ -> 1
       | _, Clos _ -> -1
-      | Int n, Int n' -> Pervasives.compare n n'
-      | Int _, _ -> 1
-      | _, Int _ -> -1
-      | Undefined, Undefined -> 0
+      | x, y -> Pervasives.compare x y
     let to_string = function
       | Clos _ -> "<clos>"
-      | Int n -> string_of_int n
+      | Num -> "Num"
+      | True -> "#t"
+      | False -> "#f"
       | Undefined -> "<undefined>"
   end
   module Lattice = SetLattice(V)
@@ -394,7 +398,11 @@ struct
       (Lattice.abst [V.Clos (lam, env)], AddressSet.empty,
        ProcIdSet.singleton (create_id lam env store))
     | Int n ->
-      (Lattice.abst [V.Int n], AddressSet.empty, ProcIdSet.empty)
+      (Lattice.abst [V.Num], AddressSet.empty, ProcIdSet.empty)
+    | True ->
+      (Lattice.abst [V.True], AddressSet.empty, ProcIdSet.empty)
+    | False ->
+      (Lattice.abst [V.False], AddressSet.empty, ProcIdSet.empty)
 
   let alloc v state =
     Address.alloc (Store.size state.store + 1)
@@ -534,7 +542,7 @@ struct
                                               memo = memo';
                                               reads = reads'}, ss)) :: acc
             end
-          | V.Undefined | V.Int _ -> acc)
+          | V.Undefined | V.Num | V.True | V.False -> acc)
         [] (Lattice.concretize rator)
     | Exp (CExp (Set (v, ae))) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
@@ -590,7 +598,7 @@ struct
   let touching_rel1 addr store =
     List.fold_left (fun acc -> function
         | V.Clos a -> AddressSet.union acc (touch a)
-        | V.Undefined | V.Int _ -> acc)
+        | V.Undefined | V.Num | V.True | V.False -> acc)
       AddressSet.empty
       (Lattice.concretize (Store.lookup store addr))
 
