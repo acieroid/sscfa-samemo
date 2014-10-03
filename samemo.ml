@@ -206,7 +206,11 @@ end
 module ANFStructure =
 struct
   type var = string
-  and lam = var * exp
+  type operator =
+    | Plus | Minus | Times | Divide
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual
+    | Id
+  type lam = var * exp
   and aexp =
     | Var of var
     | Lambda of lam
@@ -215,6 +219,7 @@ struct
   and cexp =
     | Call of aexp * aexp
     | Set of var * aexp
+    | Op of operator * aexp list
   and exp =
     | Let of var * cexp *  exp
     | LetRec of var * cexp * exp
@@ -233,11 +238,24 @@ struct
       StringSet.union (free_aexp f) (free_aexp ae)
     | Set (v, ae) ->
       StringSet.add v (free_aexp ae)
+    | Op (op, args) ->
+      BatList.fold_left (fun acc arg -> StringSet.union acc (free_aexp arg))
+        StringSet.empty args
   and free_aexp = function
     | Var v -> StringSet.singleton v
     | Lambda (v, exp) -> StringSet.remove v (free exp)
     | Int _ | True | False -> StringSet.empty
 
+  let string_of_op = function
+    | Plus -> "+"
+    | Minus -> "-"
+    | Times -> "*"
+    | Divide -> "/"
+    | Lesser -> "<"
+    | LesserOrEqual -> "<="
+    | Greater -> ">"
+    | GreaterOrEqual -> ">="
+    | Id -> "id"
   let rec string_of_exp = function
     | Let (v, cexp, exp) ->
       Printf.sprintf "(let ((%s %s)) %s)"
@@ -252,6 +270,9 @@ struct
       Printf.sprintf "(%s %s)" (string_of_aexp f) (string_of_aexp ae)
     | Set (v, ae) ->
       Printf.sprintf "(set! %s %s)" v (string_of_aexp ae)
+    | Op (op, args) ->
+      Printf.sprintf "(%s %s)"
+        (string_of_op op) (String.concat " " (BatList.map string_of_aexp args))
   and string_of_aexp = function
     | Var v -> v
     | Lambda (v, e) ->
@@ -280,6 +301,7 @@ struct
       | Num
       | True
       | False
+      | Boolean
       | Undefined
     let compare x y = match x, y with
       | Clos c, Clos c' -> compare_clo c c'
@@ -291,6 +313,7 @@ struct
       | Num -> "Num"
       | True -> "#t"
       | False -> "#f"
+      | Boolean -> "Bool"
       | Undefined -> "<undefined>"
   end
   module Lattice = SetLattice(V)
@@ -532,6 +555,13 @@ struct
                                   ProcIdSet.empty)) acc)
       addrs reads
 
+  let apply_op op args = match op with
+    | Plus | Minus | Times | Divide -> Lattice.abst [V.Num]
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual -> Lattice.abst [V.Boolean]
+    | Id -> match args with
+      | x :: [] -> x
+      | _ -> failwith "Invalid numbre of arguments to 'id'"
+
   let step_no_gc (state, ss) frame = match state.control with
     | Exp (CExp (Call (f, ae))) ->
       Printf.printf "Call\n%!";
@@ -566,7 +596,7 @@ struct
                                               memo = memo';
                                               reads = reads'}, ss)) :: acc
             end
-          | V.Undefined | V.Num | V.True | V.False -> acc)
+          | V.Undefined | V.Num | V.True | V.False | V.Boolean -> acc)
         [] (Lattice.concretize rator)
     | Exp (CExp (Set (v, ae))) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
@@ -585,6 +615,17 @@ struct
                                           reads = update_reads state.reads addrs
                                               (Summary.marked ss)}, ss)) :: acc
           | _ -> acc) [] (Lattice.concretize clo)
+    | Exp (CExp (Op (op, args))) ->
+      let (revds, addrs, ids) = BatList.fold_left (fun (ds, addrs, ids) arg ->
+          let (d, addrs', ids') = atomic_eval arg state.env state.store in
+          (d :: ds, AddressSet.union addrs addrs', ProcIdSet.union ids ids'))
+          ([], AddressSet.empty, ProcIdSet.empty) args in
+      let ds = BatList.rev revds in
+      let d = apply_op op ds in
+      [(StackUnchanged, ({state with control = Val d;
+                                     memo = update_memo state.memo ids;
+                                     reads = update_reads state.reads addrs
+                                         (Summary.marked ss)}, ss))]
     | Exp (AExp ae) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
       [(StackUnchanged, ({state with control = Val clo;
@@ -629,7 +670,7 @@ struct
   let touching_rel1 addr store =
     List.fold_left (fun acc -> function
         | V.Clos a -> AddressSet.union acc (touch a)
-        | V.Undefined | V.Num | V.True | V.False -> acc)
+        | V.Undefined | V.Num | V.True | V.False | V.Boolean -> acc)
       AddressSet.empty
       (Lattice.concretize (Store.lookup store addr))
 
