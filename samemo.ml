@@ -564,7 +564,6 @@ struct
 
   let step_no_gc (state, ss) frame = match state.control with
     | Exp (CExp (Call (f, ae))) ->
-      Printf.printf "Call\n%!";
       let (rator, addrs, ids) = atomic_eval f state.env state.store in
       let (rand, addrs', ids') = atomic_eval ae state.env state.store in
       List.fold_left (fun acc -> function
@@ -632,8 +631,8 @@ struct
                                      memo = update_memo state.memo ids;
                                      reads = update_reads state.reads addrs
                                          (Summary.marked ss)}, ss))]
-    | Exp (Let (v, cexp, exp)) ->
-      let f = FLet (v, exp, state.env) in
+    | Exp (Let (v, exp, body)) ->
+      let f = FLet (v, body, state.env) in
       [(StackPush f, ({state with control = Exp exp}, Summary.push ss f))]
     | Exp (LetRec (v, cexp, exp)) ->
       let a = alloc v state in
@@ -660,7 +659,8 @@ struct
       vars AddressSet.empty
 
   let root ((state, ss) : conf) = match state.control with
-    | Exp e -> AddressSet.union (Summary.reachable ss) (addresses_of_vars (free e) state.env)
+    | Exp e -> AddressSet.union (Summary.reachable ss)
+                 (addresses_of_vars (free e) state.env)
     | Val _ -> Summary.reachable ss
 
   let touch (lam, env) =
@@ -940,4 +940,3 @@ let _ =
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
-
