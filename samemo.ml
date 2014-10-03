@@ -221,16 +221,16 @@ struct
     | Set of var * aexp
     | Op of operator * aexp list
   and exp =
-    | Let of var * cexp *  exp
-    | LetRec of var * cexp * exp
+    | Let of var * exp *  exp
+    | LetRec of var * exp * exp
     | CExp of cexp
     | AExp of aexp
 
   let rec free = function
-    | Let (v, cexp, exp) ->
-      StringSet.union (free_cexp cexp) (StringSet.remove v (free exp))
-    | LetRec (v, cexp, exp) ->
-      StringSet.remove v (StringSet.union (free_cexp cexp) (free exp))
+    | Let (v, exp, body) ->
+      StringSet.union (free exp) (StringSet.remove v (free body))
+    | LetRec (v, exp, body) ->
+      StringSet.remove v (StringSet.union (free exp) (free body))
     | AExp ae -> free_aexp ae
     | CExp ce -> free_cexp ce
   and free_cexp = function
@@ -257,12 +257,12 @@ struct
     | GreaterOrEqual -> ">="
     | Id -> "id"
   let rec string_of_exp = function
-    | Let (v, cexp, exp) ->
+    | Let (v, exp, body) ->
       Printf.sprintf "(let ((%s %s)) %s)"
-        v (string_of_cexp cexp) (string_of_exp exp)
-    | LetRec (v, cexp, exp) ->
+        v (string_of_exp exp) (string_of_exp body)
+    | LetRec (v, exp, body) ->
       Printf.sprintf "(letrec ((%s %s)) %s)"
-        v (string_of_cexp cexp) (string_of_exp exp)
+        v (string_of_exp exp) (string_of_exp body)
     | CExp ce -> string_of_cexp ce
     | AExp ae -> string_of_aexp ae
   and string_of_cexp = function
@@ -634,13 +634,13 @@ struct
                                          (Summary.marked ss)}, ss))]
     | Exp (Let (v, cexp, exp)) ->
       let f = FLet (v, exp, state.env) in
-      [(StackPush f, ({state with control = Exp (CExp cexp)}, Summary.push ss f))]
+      [(StackPush f, ({state with control = Exp exp}, Summary.push ss f))]
     | Exp (LetRec (v, cexp, exp)) ->
       let a = alloc v state in
       let env' = Env.extend state.env v a in
       let store' = Store.join state.store a (Lattice.abst [V.Undefined]) in
       let f = FLetRec (a, v, exp, env') in
-      [(StackUnchanged, ({state with control = Exp (CExp cexp);
+      [(StackUnchanged, ({state with control = Exp exp;
                                      env = env'; store = store'}, Summary.push ss f))]
     | Val v -> begin match frame with
         | Some ((_, ss'), f) ->
@@ -934,9 +934,10 @@ module DSG = BuildDSG(L)
 let _ =
   let exp = let open ANFStructure in
     Let ("f",
-         (Call ((Lambda ("x", AExp (Var "x"))), (Lambda ("x", AExp (Var "x"))))),
-         Let ("u", (Call (Var "f", Int 1)),
+         AExp (Lambda ("x", AExp (Var "x"))),
+         Let ("u", (CExp (Call (Var "f", Int 1))),
               CExp (Call (Var "f", Int 3)))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
+
