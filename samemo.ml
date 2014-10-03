@@ -216,10 +216,10 @@ struct
     | Lambda of lam
     | Int of int
     | True | False
+    | Op of operator * aexp list
   and cexp =
     | Call of aexp * aexp
     | Set of var * aexp
-    | Op of operator * aexp list
   and exp =
     | Let of var * exp *  exp
     | LetRec of var * exp * exp
@@ -243,12 +243,12 @@ struct
       StringSet.union (free_aexp f) (free_aexp ae)
     | Set (v, ae) ->
       StringSet.add v (free_aexp ae)
-    | Op (op, args) ->
-      BatList.fold_left (fun acc arg -> StringSet.union acc (free_aexp arg))
-        StringSet.empty args
   and free_aexp = function
     | Var v -> StringSet.singleton v
     | Lambda (v, exp) -> StringSet.remove v (free exp)
+    | Op (op, args) ->
+      BatList.fold_left (fun acc arg -> StringSet.union acc (free_aexp arg))
+        StringSet.empty args
     | Int _ | True | False -> StringSet.empty
 
   let string_of_op = function
@@ -278,9 +278,6 @@ struct
       Printf.sprintf "(%s %s)" (string_of_aexp f) (string_of_aexp ae)
     | Set (v, ae) ->
       Printf.sprintf "(set! %s %s)" v (string_of_aexp ae)
-    | Op (op, args) ->
-      Printf.sprintf "(%s %s)"
-        (string_of_op op) (String.concat " " (BatList.map string_of_aexp args))
   and string_of_aexp = function
     | Var v -> v
     | Lambda (v, e) ->
@@ -289,6 +286,9 @@ struct
       string_of_int n
     | True -> "#t"
     | False -> "#f"
+    | Op (op, args) ->
+      Printf.sprintf "(%s %s)"
+        (string_of_op op) (String.concat " " (BatList.map string_of_aexp args))
 
   module Address = IntegerAddress
   type addr = Address.t
@@ -441,7 +441,14 @@ struct
     let compare = compare_stack_change
   end
 
-  let atomic_eval atom env store =
+  let apply_op op args = match op with
+    | Plus | Minus | Times | Divide -> Lattice.abst [V.Num]
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual -> Lattice.abst [V.Boolean]
+    | Id -> match args with
+      | x :: [] -> x
+      | _ -> failwith "Invalid numbre of arguments to 'id'"
+
+  let rec atomic_eval atom env store =
     match atom with
     | Var var ->
       let a = Env.lookup env var in
@@ -455,6 +462,14 @@ struct
       (Lattice.abst [V.True], AddressSet.empty, ProcIdSet.empty)
     | False ->
       (Lattice.abst [V.False], AddressSet.empty, ProcIdSet.empty)
+    | Op (op, args) ->
+      let (revds, addrs, ids) = BatList.fold_left (fun (ds, addrs, ids) arg ->
+          let (d, addrs', ids') = atomic_eval arg env store in
+          (d :: ds, AddressSet.union addrs addrs', ProcIdSet.union ids ids'))
+          ([], AddressSet.empty, ProcIdSet.empty) args in
+      let ds = BatList.rev revds in
+      let d = apply_op op ds in
+      (d, addrs, ids)
 
   let alloc v state =
     Address.alloc (Store.size state.store + 1)
@@ -573,13 +588,6 @@ struct
                                   ProcIdSet.empty)) acc)
       addrs reads
 
-  let apply_op op args = match op with
-    | Plus | Minus | Times | Divide -> Lattice.abst [V.Num]
-    | Lesser | LesserOrEqual | Greater | GreaterOrEqual -> Lattice.abst [V.Boolean]
-    | Id -> match args with
-      | x :: [] -> x
-      | _ -> failwith "Invalid numbre of arguments to 'id'"
-
   let step_no_gc (state, ss) frame = match state.control with
     | Exp (CExp (Call (f, ae))) ->
       let (rator, addrs, ids) = atomic_eval f state.env state.store in
@@ -632,17 +640,6 @@ struct
                                           reads = update_reads state.reads addrs
                                               (Summary.marked ss)}, ss)) :: acc
           | _ -> acc) [] (Lattice.concretize clo)
-    | Exp (CExp (Op (op, args))) ->
-      let (revds, addrs, ids) = BatList.fold_left (fun (ds, addrs, ids) arg ->
-          let (d, addrs', ids') = atomic_eval arg state.env state.store in
-          (d :: ds, AddressSet.union addrs addrs', ProcIdSet.union ids ids'))
-          ([], AddressSet.empty, ProcIdSet.empty) args in
-      let ds = BatList.rev revds in
-      let d = apply_op op ds in
-      [(StackUnchanged, ({state with control = Val d;
-                                     memo = update_memo state.memo ids;
-                                     reads = update_reads state.reads addrs
-                                         (Summary.marked ss)}, ss))]
     | Exp (AExp ae) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
       [(StackUnchanged, ({state with control = Val clo;
@@ -958,7 +955,7 @@ let _ =
     Let ("f",
          AExp (Lambda ("x", AExp (Var "x"))),
          Let ("u", (CExp (Call (Var "f", Int 1))),
-              Let ("arg", (CExp (Op (Plus, [Int 3; Int 3]))),
+              Let ("arg", (AExp (Op (Plus, [Int 3; Int 3]))),
                    CExp (Call (Var "f", Var "arg"))))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
