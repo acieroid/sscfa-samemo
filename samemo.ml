@@ -223,6 +223,7 @@ struct
   and exp =
     | Let of var * exp *  exp
     | LetRec of var * exp * exp
+    | If of exp * exp * exp
     | CExp of cexp
     | AExp of aexp
 
@@ -231,6 +232,10 @@ struct
       StringSet.union (free exp) (StringSet.remove v (free body))
     | LetRec (v, exp, body) ->
       StringSet.remove v (StringSet.union (free exp) (free body))
+    | If (cond, cons, alt) ->
+      free cond |>
+      StringSet.union (free cons) |>
+      StringSet.union (free alt)
     | AExp ae -> free_aexp ae
     | CExp ce -> free_cexp ce
   and free_cexp = function
@@ -263,6 +268,9 @@ struct
     | LetRec (v, exp, body) ->
       Printf.sprintf "(letrec ((%s %s)) %s)"
         v (string_of_exp exp) (string_of_exp body)
+    | If (cond, cons, alt) ->
+      Printf.sprintf "(if %s %s %s)"
+        (string_of_exp cond) (string_of_exp cons) (string_of_exp alt)
     | CExp ce -> string_of_cexp ce
     | AExp ae -> string_of_aexp ae
   and string_of_cexp = function
@@ -354,6 +362,7 @@ struct
   type frame =
     | FLet of var * exp * env
     | FLetRec of Address.t * var * exp * env
+    | FIf of exp * exp * env
     | FMark of id * Lattice.t
 
   let create_id lam env store : id = (lam, env)
@@ -361,7 +370,8 @@ struct
   let string_of_frame = function
     | FLet (v, e, env) -> Printf.sprintf "Let(%s)" v
     | FLetRec (a, v, e, env) -> Printf.sprintf "LetRec(%s)" v
-    | FMark _ -> Printf.sprintf "Mark"
+    | FIf _ ->  "If"
+    | FMark _ -> "Mark"
 
   let compare_frame x y = match x, y with
     | FLet (v, exp, env), FLet (v', exp', env') ->
@@ -375,6 +385,11 @@ struct
                     lazy (Pervasives.compare exp exp');
                     lazy (Env.compare env env')]
     | FLetRec _, _ -> 1 | _, FLetRec _ -> -1
+    | FIf (cons, alt, env), FIf (cons', alt', env') ->
+      order_concat [lazy (Pervasives.compare cons cons');
+                    lazy (Pervasives.compare alt alt');
+                    lazy (Env.compare env env')]
+    | FIf _, _ -> 1 | _, FIf _ -> -1
     | FMark ((lam, env), d), FMark ((lam', env'), d') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env');
@@ -475,21 +490,17 @@ struct
              (BatList.map Address.to_string
                 (AddressSet.elements addrs))) ^ "]"
 
-  let touch = function
+  let touch =
+    let helper env vars =
+      StringSet.fold (fun v acc -> AddressSet.add (Env.lookup env v) acc)
+        vars AddressSet.empty in
+    function
     | FLet (v, e, env) ->
-      StringSet.fold (fun v' acc ->
-          if v' = v then
-            acc
-          else
-            AddressSet.add (Env.lookup env v') acc)
-        (free e) AddressSet.empty
+      helper env (StringSet.remove v (free e))
     | FLetRec (a, v, e, env) ->
-      AddressSet.add a (StringSet.fold (fun v' acc ->
-          if v' = v then
-            acc
-          else
-            AddressSet.add (Env.lookup env v') acc)
-        (free e) AddressSet.empty)
+      AddressSet.add a (helper env (StringSet.remove v (free e)))
+    | FIf (cons, alt, env) ->
+      helper env (StringSet.union (free cons) (free alt))
     | FMark (_, _) ->
       AddressSet.empty
 
@@ -527,17 +538,24 @@ struct
       let a = alloc v state in
       let env'' = Env.extend env' v a in
       let store' = Store.join state.store a d in
-      {state with store = store'; env = env''; control = Exp e}
+      [{state with store = store'; env = env''; control = Exp e}]
     | FLetRec (a, v, e, env') ->
       let store' = Store.join state.store a d in (* TODO: set *)
-      {state with store = store'; control = Exp e}
+      [{state with store = store'; control = Exp e}]
+    | FIf (cons, alt, env') ->
+      BatList.flatten (BatList.map (function
+        | V.True -> [{state with control = Exp cons}]
+        | V.False -> [{state with control = Exp alt}]
+        | V.Boolean -> [{state with control = Exp cons};
+                      {state with control = Exp alt}]
+        | V.Num | V.Clos _ | V.Undefined -> []) (Lattice.concretize d))
     | FMark (id, d_arg) ->
-      {state with memo = match ProcIdMap.find id state.memo with
+      [{state with memo = match ProcIdMap.find id state.memo with
            | Table table ->
              ProcIdMap.add id (Table (ValueTable.add d_arg d table)) state.memo
            | exception Not_found ->
              ProcIdMap.add id (Table (ValueTable.add d_arg d ValueTable.empty)) state.memo
-           | Impure | Poly -> state.memo}
+           | Impure | Poly -> state.memo}]
 
   let update_memo memo ids =
     ProcIdSet.fold (fun id acc ->
@@ -639,11 +657,15 @@ struct
       let env' = Env.extend state.env v a in
       let store' = Store.join state.store a (Lattice.abst [V.Undefined]) in
       let f = FLetRec (a, v, exp, env') in
-      [(StackUnchanged, ({state with control = Exp exp;
-                                     env = env'; store = store'}, Summary.push ss f))]
+      [(StackPush f, ({state with control = Exp exp;
+                                  env = env';
+                                  store = store'}, Summary.push ss f))]
+    | Exp (If (cons, cond, alt)) ->
+      let f = FIf (cond, alt, state.env) in
+      [(StackPush f, ({state with control = Exp cons}, Summary.push ss f))]
     | Val v -> begin match frame with
         | Some ((_, ss'), f) ->
-          [(StackPop f, (apply_kont f v state, ss'))]
+          BatList.map (fun state -> (StackPop f, (state, ss'))) (apply_kont f v state)
         | None ->
           []
       end
@@ -936,7 +958,8 @@ let _ =
     Let ("f",
          AExp (Lambda ("x", AExp (Var "x"))),
          Let ("u", (CExp (Call (Var "f", Int 1))),
-              CExp (Call (Var "f", Int 3)))) in
+              Let ("arg", (CExp (Op (Plus, [Int 3; Int 3]))),
+                   CExp (Call (Var "f", Var "arg"))))) in
   let dsg = DSG.build_dyck exp in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
