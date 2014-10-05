@@ -649,11 +649,11 @@ struct
     | Exp (Let (v, exp, body)) ->
       let f = FLet (v, body, state.env) in
       [(StackPush f, ({state with control = Exp exp}, Summary.push ss f))]
-    | Exp (LetRec (v, cexp, exp)) ->
+    | Exp (LetRec (v, exp, body)) ->
       let a = alloc v state in
       let env' = Env.extend state.env v a in
       let store' = Store.join state.store a (Lattice.abst [V.Undefined]) in
-      let f = FLetRec (a, v, exp, env') in
+      let f = FLetRec (a, v, body, env') in
       [(StackPush f, ({state with control = Exp exp;
                                   env = env';
                                   store = store'}, Summary.push ss f))]
