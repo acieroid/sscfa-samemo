@@ -1,5 +1,8 @@
 open Utils
 
+let param_gc = ref true
+let param_memo = ref true
+
 module type Address_signature =
 sig
   type t
@@ -573,20 +576,26 @@ struct
            | Impure | Poly -> state.memo}]
 
   let update_memo memo ids =
-    ProcIdSet.fold (fun id acc ->
-        if ProcIdMap.mem id acc then
-          ProcIdMap.add id Poly acc
-        else
-          acc) ids memo
+    if !param_memo then
+      ProcIdSet.fold (fun id acc ->
+          if ProcIdMap.mem id acc then
+            ProcIdMap.add id Poly acc
+          else
+            acc) ids memo
+    else
+      memo
 
   let update_reads reads addrs marked =
-    AddressSet.fold (fun addr acc ->
-        AddressMap.add addr (ProcIdSet.union marked
-                               (if AddressMap.mem addr acc then
-                                  AddressMap.find addr acc
-                                else
-                                  ProcIdSet.empty)) acc)
-      addrs reads
+    if !param_memo then
+      AddressSet.fold (fun addr acc ->
+          AddressMap.add addr (ProcIdSet.union marked
+                                 (if AddressMap.mem addr acc then
+                                    AddressMap.find addr acc
+                                  else
+                                    ProcIdSet.empty)) acc)
+        addrs reads
+    else
+      reads
 
   let step_no_gc (state, ss) frame = match state.control with
     | Exp (CExp (Call (f, ae))) ->
@@ -721,7 +730,10 @@ struct
      ss)
 
   let step conf =
-    step_no_gc (gc conf)
+    if !param_gc then
+      step_no_gc (gc conf)
+    else
+      step_no_gc conf
 
   let conf_color (state, _) = match state.control with
     | Exp _ -> 0xFFDDDD
