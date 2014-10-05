@@ -742,6 +742,7 @@ module type BuildDSG_signature =
     val explore : dsg -> L.conf -> ConfSet.t * EdgeSet.t * EpsSet.t
     val output_dsg : dsg -> string -> unit
     val output_ecg : dsg -> string -> unit
+    val print_stats : dsg -> unit
   end
 
 module BuildDSG : BuildDSG_signature =
@@ -814,6 +815,7 @@ module BuildDSG : BuildDSG_signature =
     type dsg = { g : G.t; q0 : L.conf; ecg : G.t }
     let output_dsg dsg = output_graph dsg.g
     let output_ecg dsg = output_graph dsg.ecg
+    let print_stats dsg = Printf.printf "Size: %d/%d\n%!" (G.nb_vertex dsg.g) (G.nb_edges dsg.g)
 
     let add_short dsg c c' =
       let (de, dh) = G.fold_edges_e
@@ -976,4 +978,5 @@ let _ =
     AExp (Op (Plus, [Var "f3"; Var "g4"]))))))))) in
   let dsg = DSG.build_dyck gcipd in
   DSG.output_dsg dsg "dsg.dot";
-  DSG.output_ecg dsg "ecg.dot"
+  DSG.output_ecg dsg "ecg.dot";
+  DSG.print_stats dsg
