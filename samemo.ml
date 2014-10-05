@@ -957,6 +957,23 @@ let _ =
          Let ("u", (CExp (Call (Var "f", Int 1))),
               Let ("arg", (AExp (Op (Plus, [Int 3; Int 3]))),
                    CExp (Call (Var "f", Var "arg"))))) in
-  let dsg = DSG.build_dyck exp in
+  let gcipd = let open ANFStructure in
+    Let ("id", AExp (Lambda ("x", AExp (Var "x"))),
+    LetRec ("f", (AExp (Lambda ("n",
+                                (If (AExp (Op (LesserOrEqual, [Var "n"; Int 1])),
+                                     AExp (Int 1),
+                                     Let ("fn1", CExp (Call (Var "f", Op (Minus, [Var "n"; Int 1]))),
+                                          AExp (Op (Times, [Var "n"; Var "fn1"])))))))),
+    LetRec ("g", (AExp (Lambda ("n",
+                                If (AExp (Op (LesserOrEqual, [Var "n"; Int 1])),
+                                    AExp (Int 1),
+                                    Let ("gn1", CExp (Call (Var "g", Op (Minus, [Var "n"; Int 1]))),
+                                         AExp (Op (Plus, [Op (Times, [Var "n"; Var "n"]); Var "gn1"]))))))),
+    Let ("idf", CExp (Call (Var "id", Var "f")),
+    Let ("f3", CExp (Call (Var "idf", Int 3)),
+    Let ("idg", CExp (Call (Var "id", Var "g")),
+    Let ("g4", CExp (Call (Var "idg", Int 4)),
+    AExp (Op (Plus, [Var "f3"; Var "g4"]))))))))) in
+  let dsg = DSG.build_dyck gcipd in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot"
