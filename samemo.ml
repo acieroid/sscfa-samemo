@@ -201,7 +201,7 @@ module MapStore : StoreSignature =
     let join store a v =
       if AddrMap.mem a store then
         let (v', count) = AddrMap.find a store in
-        AddrMap.add a ((L.join v v'), Infinity) store
+        AddrMap.add a ((L.join v v'), One) store
       else
         AddrMap.add a (v, One) store
 
