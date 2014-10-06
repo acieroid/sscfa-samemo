@@ -1,0 +1,8 @@
+(let ((id (lambda (x) x)))
+   (letrec ((f (lambda (n) (if (<= n 1) 1 (let ((fn1 (f (- n 1)))) (* n fn1))))))
+     (letrec ((g (lambda (n) (if (<= n 1) 1 (let ((gn1 (f (- n 1)))) (* n gn1))))))
+       (let ((idf (id f)))
+         (let ((f3 (idf 3)))
+           (let ((idg (id g)))
+             (let ((g4 (idg 4)))
+               (+ f3 g4))))))))
