@@ -2,7 +2,16 @@ open Utils
 
 let param_gc = ref true
 let param_memo = ref true
-let k = 1
+let k = ref 1
+
+let speclist = [
+  "-gc", Arg.Set param_gc,
+  "Garbage collection";
+  "-memo", Arg.Set param_memo,
+  "Abstract memoization";
+  "-k", Arg.Set_int k,
+  "Polyvariance";
+]
 
 module type AddressSignature =
 sig
@@ -47,7 +56,7 @@ struct
   let initial = []
   let compare = compare_list Pervasives.compare
   let to_string t = String.concat "," (BatList.map string_of_int t)
-  let tick x t = BatList.take k (x :: t)
+  let tick x t = BatList.take !k (x :: t)
 end
 
 module type EnvSignature =
@@ -1067,7 +1076,9 @@ module BuildDSG : BuildDSGSignature =
 module L = ANFGarbageCollected
 module DSG = BuildDSG(L)
 
-let _ =
+let usage = "usage: " ^ (Sys.argv.(0)) ^ " [params]"
+let () =
+  let () = Arg.parse speclist (fun x -> ()) usage in
   let exp = let open ANFStructure in
     Let ("f",
          AExp (Lambda ("x", AExp (Var "x"))),
