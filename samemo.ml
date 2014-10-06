@@ -32,7 +32,7 @@ sig
   val initial : t
   val compare : t -> t -> int
   val to_string : t -> string
-  val tick : arg  -> t -> t
+  val tick : arg -> t -> t
 end
 
 module MakeAddress :
@@ -61,6 +61,7 @@ end
 
 module type EnvSignature =
   functor (A : AddressSignature) ->
+  functor (T : TimeSignature) ->
   sig
     type t
     (** The empty environment *)
@@ -71,25 +72,36 @@ module type EnvSignature =
     val lookup : t -> string -> A.t
     (** Define the ordering between two environments *)
     val compare : t -> t -> int
-    (** Give the environment size *)
-    val size : t -> int
     (** String representation of an environment *)
     val to_string : t -> string
+    (** Update the environment tag when a function is called *)
+    val call : T.arg -> t -> t
+    (** Get the time stored inside the environment *)
+    val time : t -> T.t
   end
 
 module MapEnv : EnvSignature =
-  functor (A : AddressSignature) ->
+  functor (A : AddressSignature) -> 
+  functor (T : TimeSignature) ->
   struct
     module StringMap = BatMap.Make(BatString)
-    type t = A.t StringMap.t
-    let empty = StringMap.empty
-    let extend env var addr = StringMap.add var addr env
-    let lookup env var = StringMap.find var env
-    let compare = StringMap.compare A.compare
-    let size = StringMap.cardinal
-    let to_string env = String.concat ", "
+    type t = {
+      env : A.t StringMap.t;
+      time : T.t;
+    }
+    let empty = {env = StringMap.empty; time = T.initial}
+    let extend t var addr =
+      {t with env = StringMap.add var addr t.env}
+    let lookup t var = StringMap.find var t.env
+    let compare t t' =
+      order_concat [lazy (StringMap.compare A.compare t.env t'.env);
+                    lazy (T.compare t.time t'.time)]
+    let to_string t = String.concat ", "
         (BatList.map (fun (v, a) -> v ^ ": " ^ (A.to_string a))
-           (StringMap.bindings env))
+           (StringMap.bindings t.env))
+    let call arg t =
+      {t with time = T.tick arg t.time}
+    let time t = t.time
   end
 
 module type LatticeSignature =
@@ -431,7 +443,7 @@ struct
   type addr = Address.t
   module AddressSet = BatSet.Make(Address)
 
-  module Env = MapEnv(Address)
+  module Env = MapEnv(Address)(Time)
   type env = Env.t
 
   type clo = lam * env
@@ -604,7 +616,7 @@ struct
       (d, addrs, ids)
 
   let alloc v state =
-    Address.alloc v 0 state.time
+    Address.alloc v 0 (Env.time state.env)
 end
 
 module type StackSummary =
@@ -745,7 +757,7 @@ struct
                 let f = FMark (id, rand, state.env) in
                 (StackPush f,
                  ({control = Exp e;
-                   env = Env.extend env' v a;
+                   env = Env.call tag (Env.extend env' v a);
                    store = Store.join state.store a rand;
                    memo = memo';
                    reads = reads';
