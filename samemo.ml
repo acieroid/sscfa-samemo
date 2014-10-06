@@ -491,10 +491,17 @@ struct
     | Impure
     | Poly
     | Table of Lattice.t ValueTable.t
+  let compare_table x y = match x, y with
+    | Table x, Table y -> ValueTable.compare Lattice.compare x y
+    | Table _, _ -> 1 | _, Table _ -> -1
+    | _, _ -> Pervasives.compare x y
+
   type memo = table ProcIdMap.t
+  let memo_compare = ProcIdMap.compare compare_table
   let memo_empty : memo = ProcIdMap.empty
   module AddressMap = BatMap.Make(Address)
   type reads = ProcIdSet.t AddressMap.t
+  let reads_compare = AddressMap.compare ProcIdSet.compare
   let reads_empty : reads = AddressMap.empty
 
   type store = Store.t
@@ -552,7 +559,10 @@ struct
     order_concat
       [lazy (compare_control state.control state'.control);
        lazy (Env.compare state.env state'.env);
-       lazy (Store.compare state.store state'.store)]
+       lazy (Store.compare state.store state'.store);
+       lazy (memo_compare state.memo state'.memo);
+       lazy (reads_compare state.reads state'.reads);
+       lazy (Time.compare state.time state'.time)]
   let string_of_state state =
     (string_of_control state.control)
 
