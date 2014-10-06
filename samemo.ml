@@ -189,8 +189,6 @@ module MapStore : StoreSignature =
     let join store a v =
       if AddrMap.mem a store then
         let (v', count) = AddrMap.find a store in
-        let () = Printf.printf "Joining %s and %s at location %s\n%!"
-            (L.to_string v) (L.to_string v') (A.to_string a) in
         AddrMap.add a ((L.join v v'), Infinity) store
       else
         AddrMap.add a (v, One) store
@@ -250,7 +248,7 @@ sig
   type stack_change =
     | StackPop of frame
     | StackPush of frame
-    | StackUnchanged
+    | StackUnchanged of string
   module StackChangeOrdering : BatInterfaces.OrderedType with type t = stack_change
   val string_of_stack_change : stack_change -> string
 
@@ -523,21 +521,21 @@ struct
   type stack_change =
     | StackPop of frame
     | StackPush of frame
-    | StackUnchanged
+    | StackUnchanged of string
 
   let compare_stack_change g1 g2 = match (g1, g2) with
     | StackPop f1, StackPop f2 -> compare_frame f1 f2
     | StackPush f1, StackPush f2 -> compare_frame f1 f2
-    | StackUnchanged, StackUnchanged -> 0
+    | StackUnchanged s, StackUnchanged s' -> Pervasives.compare s s'
     | StackPop _, _ -> 1
     | _, StackPop _ -> -1
-    | StackPush _, StackUnchanged -> 1
-    | StackUnchanged, _ -> -1
+    | StackPush _, StackUnchanged _ -> 1
+    | StackUnchanged _, _ -> -1
 
   let string_of_stack_change = function
     | StackPush f -> "+" ^ (string_of_frame f)
     | StackPop f -> "-" ^ (string_of_frame f)
-    | StackUnchanged -> "e"
+    | StackUnchanged s -> s
 
   module FrameOrdering = struct
     type t = frame
@@ -737,10 +735,10 @@ struct
                    time = Time.tick tag state.time}, ss)) :: acc
               | Some d ->
                 Printf.printf "Hit\n%!";
-                (StackUnchanged, ({state with control = Val d;
-                                              memo = memo';
-                                              reads = reads';
-                                              time = Time.tick tag state.time}, ss)) :: acc
+                (StackUnchanged "memo", ({state with control = Val d;
+                                                     memo = memo';
+                                                     reads = reads';
+                                                     time = Time.tick tag state.time}, ss)) :: acc
             end
           | V.Undefined | V.Num | V.True | V.False | V.Boolean -> acc)
         [] (Lattice.concretize rator)
@@ -756,14 +754,14 @@ struct
             let memo' = update_memo state.memo ids |>
                         ProcIdMap.add id Impure |>
                         ProcIdMap.filter (fun id _ -> not (ProcIdSet.mem id reads_ids)) in
-            (StackUnchanged, ({state with control = Val v; store = store';
+            (StackUnchanged "e", ({state with control = Val v; store = store';
                                           memo = memo';
                                           reads = update_reads state.reads addrs
                                               (Summary.marked ss)}, ss)) :: acc
           | _ -> acc) [] (Lattice.concretize clo)
     | Exp (AExp ae) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
-      [(StackUnchanged, ({state with control = Val clo;
+      [(StackUnchanged "e", ({state with control = Val clo;
                                      memo = update_memo state.memo ids;
                                      reads = update_reads state.reads addrs
                                          (Summary.marked ss)}, ss))]
@@ -878,7 +876,7 @@ module BuildDSG : BuildDSGSignature =
         let equal x y = compare x y == 0
       end)(struct
         include L.StackChangeOrdering
-        let default = L.StackUnchanged
+        let default = L.StackUnchanged "e"
       end)
 
     module DotArg = struct
@@ -900,13 +898,13 @@ module BuildDSG : BuildDSGSignature =
           id
 
       let edge_attributes ((_, f, _) : E.t) =
-        [`Label (L.string_of_stack_change f)]
+        [`Label (BatString.slice ~last:20 (L.string_of_stack_change f))]
       let default_edge_attributes _ = []
       let get_subgraph _ = None
       let vertex_name (state : V.t) =
         (string_of_int (node_id state))
       let vertex_attributes (state : V.t) =
-        [`Label (L.string_of_conf state);
+        [`Label (BatString.slice ~last:20 (L.string_of_conf state));
          `Style `Filled;
          `Fillcolor (L.conf_color state)]
       let default_vertex_attributes _ = []
@@ -977,7 +975,7 @@ module BuildDSG : BuildDSGSignature =
        EpsSet.filter (fun (c1, c2) -> not (G.mem_edge dsg.ecg c1 c2)) dh')
 
     let add_edge dsg c g c' = match g with
-      | L.StackUnchanged ->
+      | L.StackUnchanged s ->
         let (ds, de, dh) = add_short { dsg with ecg = G.add_edge dsg.ecg c c' } c c' in
         (ds, de, EpsSet.add (c, c') dh)
       | L.StackPush k ->
