@@ -1,6 +1,6 @@
 open Utils
 
-let param_gc = ref true
+let param_gc = ref false
 let param_memo = ref false
 let k = 1
 
@@ -12,8 +12,8 @@ sig
   val compare : t -> t -> int
   (** Convert an address to a string *)
   val to_string : t -> string
-  (** Allocate a new address from an integer *)
-  val alloc : int -> time -> t
+  (** Allocate a new address *)
+  val alloc : string -> int -> time -> t
 end
 
 module type TimeSignature =
@@ -31,12 +31,13 @@ module MakeAddress :
   functor (T : TimeSignature) ->
     struct
       type time = T.t
-      type t = int * T.t
-      let compare (tag, t) (tag', t') =
-        order_concat [lazy (Pervasives.compare tag tag');
+      type t = string * int * T.t
+      let compare (v, tag, t) (v', tag', t') =
+        order_concat [lazy (BatString.compare v v');
+                      lazy (Pervasives.compare tag tag');
                       lazy (T.compare t t')]
-      let to_string (_, t) = T.to_string t
-      let alloc n t = (n, t)
+      let to_string (v, _, t) = v ^ "@" ^ T.to_string t
+      let alloc v n t = (v, n, t)
     end
 
 module KCFATime : TimeSignature with type arg = int =
@@ -524,7 +525,7 @@ struct
       (d, addrs, ids)
 
   let alloc v state =
-    Address.alloc 0 state.time
+    Address.alloc v 0 state.time
 end
 
 module type StackSummary =
