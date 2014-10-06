@@ -1076,35 +1076,16 @@ module BuildDSG : BuildDSGSignature =
 module L = ANFGarbageCollected
 module DSG = BuildDSG(L)
 
-let usage = "usage: " ^ (Sys.argv.(0)) ^ " [params]"
+let usage = "usage: " ^ (Sys.argv.(0)) ^ " [params] file"
+let file = ref None
 let () =
-  let () = Arg.parse speclist (fun x -> ()) usage in
-  let exp = let open ANFStructure in
-    Let ("f",
-         AExp (Lambda ("x", AExp (Var "x"))),
-         Let ("u", (CExp (Call (Var "f", Int 1, 1))),
-              Let ("arg", (AExp (Op (Plus, [Int 3; Int 3]))),
-                   CExp (Call (Var "f", Var "arg", 2))))) in
-  let gcipd_str =
-"(let ((id (lambda (x) x)))
-   (letrec ((f (lambda (n) (if (<= n 1) 1 (let ((fn1 (f (- n 1)))) (* n fn1))))))
-     (letrec ((g (lambda (n) (if (<= n 1) 1 (let ((gn1 (f (- n 1)))) (* n gn1))))))
-       (let ((idf (id f)))
-         (let ((f3 (idf 3)))
-           (let ((idg (id g)))
-             (let ((g4 (idg 4)))
-               (+ f3 g4))))))))" in
-  let gcipd = L.parse gcipd_str in
-  let fib_str = "
-(letrec ((fib (lambda (n)
-                (if (<= n 2)
-                  n
-                  (let ((fibn1 (fib (- n 1))))
-                    (let ((fibn2 (fib (- n 2))))
-                      (+ fibn1 fibn2)))))))
-  (fib 4))" in
-  let fib = L.parse fib_str in
-  let dsg = DSG.build_dyck gcipd in
-  DSG.output_dsg dsg "dsg.dot";
-  DSG.output_ecg dsg "ecg.dot";
-  DSG.print_stats dsg
+  let () = Arg.parse speclist (fun x -> file := Some x) usage in
+  match !file with
+  | None -> print_endline usage
+  | Some f ->
+    let str = Std.input_file f in
+    let exp = L.parse str in
+    let dsg = DSG.build_dyck exp in
+    DSG.output_dsg dsg "dsg.dot";
+    DSG.output_ecg dsg "ecg.dot";
+    DSG.print_stats dsg
