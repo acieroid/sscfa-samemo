@@ -1,7 +1,7 @@
 open Utils
 
-let param_gc = ref true
-let param_memo = ref true
+let param_gc = ref false
+let param_memo = ref false
 let k = ref 1
 
 let speclist = [
@@ -1085,23 +1085,16 @@ let () =
          Let ("u", (CExp (Call (Var "f", Int 1, 1))),
               Let ("arg", (AExp (Op (Plus, [Int 3; Int 3]))),
                    CExp (Call (Var "f", Var "arg", 2))))) in
-  let gcipd = let open ANFStructure in
-    Let ("id", AExp (Lambda ("x", AExp (Var "x"))),
-    LetRec ("f", (AExp (Lambda ("n",
-                                (If (AExp (Op (LesserOrEqual, [Var "n"; Int 1])),
-                                     AExp (Int 1),
-                                     Let ("fn1", CExp (Call (Var "f", Op (Minus, [Var "n"; Int 1]), 1)),
-                                          AExp (Op (Times, [Var "n"; Var "fn1"])))))))),
-    LetRec ("g", (AExp (Lambda ("n",
-                                If (AExp (Op (LesserOrEqual, [Var "n"; Int 1])),
-                                    AExp (Int 1),
-                                    Let ("gn1", CExp (Call (Var "g", Op (Minus, [Var "n"; Int 1]), 2)),
-                                         AExp (Op (Plus, [Op (Times, [Var "n"; Var "n"]); Var "gn1"]))))))),
-    Let ("idf", CExp (Call (Var "id", Var "f", 3)),
-    Let ("f3", CExp (Call (Var "idf", Int 3, 4)),
-    Let ("idg", CExp (Call (Var "id", Var "g", 5)),
-    Let ("g4", CExp (Call (Var "idg", Int 4, 6)),
-    AExp (Op (Plus, [Var "f3"; Var "g4"]))))))))) in
+  let gcipd_str =
+"(let ((id (lambda (x) x)))
+   (letrec ((f (lambda (n) (if (<= n 1) 1 (let ((fn1 (f (- n 1)))) (* n fn1))))))
+     (letrec ((g (lambda (n) (if (<= n 1) 1 (let ((gn1 (f (- n 1)))) (* n gn1))))))
+       (let ((idf (id f)))
+         (let ((f3 (idf 3)))
+           (let ((idg (id g)))
+             (let ((g4 (idg 4)))
+               (+ f3 g4))))))))" in
+  let gcipd = L.parse gcipd_str in
   let fib_str = "
 (letrec ((fib (lambda (n)
                 (if (<= n 2)
@@ -1111,7 +1104,7 @@ let () =
                       (+ fibn1 fibn2)))))))
   (fib 4))" in
   let fib = L.parse fib_str in
-  let dsg = DSG.build_dyck fib in
+  let dsg = DSG.build_dyck gcipd in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot";
   DSG.print_stats dsg
