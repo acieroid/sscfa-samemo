@@ -554,7 +554,7 @@ struct
        lazy (Env.compare state.env state'.env);
        lazy (Store.compare state.store state'.store)]
   let string_of_state state =
-    (string_of_control state.control) ^ "@" ^ (Time.to_string state.time)
+    (string_of_control state.control)
 
   type stack_change =
     | StackPop of frame
