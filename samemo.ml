@@ -219,6 +219,8 @@ module type LangSignature =
 sig
   (** An expression *)
   type exp
+  (** Parse an expression *)
+  val parse : string -> exp
   (** Convert an expression to a printable string *)
   val string_of_exp : exp -> string
 
@@ -278,6 +280,48 @@ struct
     | If of exp * exp * exp
     | CExp of cexp
     | AExp of aexp
+
+  let parse s =
+    let i = ref 0 in
+    let new_id () = i := !i + 1; !i in
+    let is_op = function
+      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" -> true
+      | _ -> false in
+    let to_op = function
+      | "+" -> Plus | "-" -> Minus | "*" -> Times | "/" -> Divide
+      | "<" -> Lesser | "<=" -> LesserOrEqual | ">" -> Greater | ">=" -> GreaterOrEqual
+      | "id" -> Id | op -> failwith ("unknown op: " ^ op) in
+    let open SExpr in
+    let rec convert_aexp = function
+      | Expr [Atom "lambda"; Expr [Atom arg]; body] ->
+        Lambda (arg, convert_exp body)
+      | Atom "#t" -> True
+      | Atom "#f" -> False
+      | Atom x -> begin try Int (int_of_string x) with
+          Failure "int_of_string" -> Var x
+        end
+      | Expr (Atom op :: args) when is_op op ->
+        Op (to_op op, BatList.map convert_aexp args)
+      | sexp -> failwith ("cannot parse aexp: " ^ (string_of_sexpr [sexp]))
+    and convert_cexp = function
+      | Expr [Atom "set!"; Atom v; aexp] ->
+        if is_op v then failwith ("cannot set! an operator: " ^ v) else
+          Set (v, convert_aexp aexp)
+      | Expr [f; arg] ->
+        Call (convert_aexp f, convert_aexp arg, new_id ())
+      | sexp -> failwith ("cannot parse cexp: " ^ (string_of_sexpr [sexp]))
+    and convert_exp = function
+      | Expr [Atom "let"; Expr [Expr [Atom v; exp]]; body] ->
+        Let (v, convert_exp exp, convert_exp body)
+      | Expr [Atom "letrec"; Expr [Expr [Atom v; exp]]; body] ->
+        LetRec (v, convert_exp exp, convert_exp body)
+      | Expr [Atom "if"; cond; cons; alt] ->
+        If (convert_exp cond, convert_exp cons, convert_exp alt)
+      | exp ->
+        try CExp (convert_cexp exp) with
+        | Failure f1 -> try AExp (convert_aexp exp) with
+          | Failure f2 -> failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2) in
+    convert_exp (BatList.hd (SExpr.parse_string s))
 
   let rec free = function
     | Let (v, exp, body) ->
@@ -1047,14 +1091,15 @@ let _ =
     Let ("idg", CExp (Call (Var "id", Var "g", 5)),
     Let ("g4", CExp (Call (Var "idg", Int 4, 6)),
     AExp (Op (Plus, [Var "f3"; Var "g4"]))))))))) in
-  let fib = let open ANFStructure in
-    LetRec ("fib", AExp (Lambda ("n",
-                                 If (AExp (Op (LesserOrEqual, [Var "n"; Int 2])),
-                                     AExp (Var "n"),
-                                     Let ("fibn1", CExp (Call (Var "fib", Op (Minus, [Var "n"; Int 1]), 1)),
-                                          Let ("fibn2", CExp (Call (Var "fib", Op (Minus, [Var "n"; Int 2]), 2)),
-                                               AExp (Op (Plus, [Var "fibn1"; Var "fibn2"]))))))),
-            CExp (Call (Var "fib", Int 4, 3))) in
+  let fib_str = "
+(letrec ((fib (lambda (n)
+                (if (<= n 2)
+                  n
+                  (let ((fibn1 (fib (- n 1))))
+                    (let ((fibn2 (fib (- n 2))))
+                      (+ fibn1 fibn2)))))))
+  (fib 4))" in
+  let fib = L.parse fib_str in
   let dsg = DSG.build_dyck fib in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot";
