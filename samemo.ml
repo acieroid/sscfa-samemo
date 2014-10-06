@@ -269,7 +269,7 @@ struct
   type var = string
   type operator =
     | Plus | Minus | Times | Divide
-    | Lesser | LesserOrEqual | Greater | GreaterOrEqual
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal
     | Id
   type lam = var * exp
   and aexp =
@@ -292,11 +292,12 @@ struct
     let i = ref 0 in
     let new_id () = i := !i + 1; !i in
     let is_op = function
-      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" -> true
+      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "=" -> true
       | _ -> false in
     let to_op = function
       | "+" -> Plus | "-" -> Minus | "*" -> Times | "/" -> Divide
       | "<" -> Lesser | "<=" -> LesserOrEqual | ">" -> Greater | ">=" -> GreaterOrEqual
+      | "=" -> Equal
       | "id" -> Id | op -> failwith ("unknown op: " ^ op) in
     let open SExpr in
     let rec convert_aexp = function
@@ -363,6 +364,7 @@ struct
     | LesserOrEqual -> "<="
     | Greater -> ">"
     | GreaterOrEqual -> ">="
+    | Equal -> "="
     | Id -> "id"
   let rec string_of_exp = function
     | Let (v, exp, body) ->
@@ -549,7 +551,7 @@ struct
 
   let apply_op op args = match op with
     | Plus | Minus | Times | Divide -> Lattice.abst [V.Num]
-    | Lesser | LesserOrEqual | Greater | GreaterOrEqual -> Lattice.abst [V.Boolean]
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal -> Lattice.abst [V.Boolean]
     | Id -> match args with
       | x :: [] -> x
       | _ -> failwith "Invalid numbre of arguments to 'id'"
