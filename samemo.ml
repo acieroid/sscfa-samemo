@@ -707,7 +707,7 @@ struct
       let store' = Store.join state.store a d in
       [{state with store = store'; env = env''; control = Exp e}]
     | FLetRec (a, v, e, env') ->
-      let store' = Store.set state.store a d in
+      let store' = Store.join state.store a d in
       [{state with store = store'; control = Exp e; env = env'}]
     | FMark (id, d_arg, env') ->
       if !param_memo then
