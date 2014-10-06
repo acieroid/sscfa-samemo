@@ -1,7 +1,7 @@
 open Utils
 
 let param_gc = ref true
-let param_memo = ref true
+let param_memo = ref false
 let k = 1
 
 module type AddressSignature =
@@ -154,6 +154,8 @@ module type StoreSignature =
     (** Add a value to the store, joining it with the existing value, if
         present *)
     val join : t -> A.t -> L.t -> t
+    (** Same as join, but can perform a strong update if possible *)
+    val set : t -> A.t -> L.t -> t
     (** Find a value in the store. Raise Not_found if no value reside at the
         given address *)
     val lookup : t -> A.t -> L.t
@@ -170,14 +172,32 @@ module MapStore : StoreSignature =
   functor (A : AddressSignature) ->
   struct
     module AddrMap = BatMap.Make(A)
-    type t = L.t AddrMap.t
+    type count = One | Infinity
+    type t = (L.t * count) AddrMap.t
     let empty = AddrMap.empty
+
     let join store a v =
       if AddrMap.mem a store then
-        AddrMap.add a (L.join (AddrMap.find a store) v) store
+        let (v', count) = AddrMap.find a store in
+        let () = Printf.printf "Joining %s and %s at location %s\n%!"
+            (L.to_string v) (L.to_string v') (A.to_string a) in
+        AddrMap.add a ((L.join v v'), Infinity) store
       else
-        AddrMap.add a v store
-    let lookup store a = AddrMap.find a store
+        AddrMap.add a (v, One) store
+
+    let set store a v =
+      if AddrMap.mem a store then
+        let (v', count) = AddrMap.find a store in
+        match count with
+        | One -> AddrMap.add a (v, One) store
+        | Infinity -> join store a v
+      else
+        AddrMap.add a (v, One) store
+
+    let lookup store a =
+      let (v, _) = AddrMap.find a store in
+      v
+
     let restrict store addrs =
       AddrMap.filter (fun a _ ->
           if (List.mem a addrs) then
@@ -185,7 +205,11 @@ module MapStore : StoreSignature =
           else begin
             print_endline ("reclaim(" ^ (A.to_string a) ^ ")");
             false end) store
-    let compare = AddrMap.compare L.compare
+    let compare =
+      AddrMap.compare (fun (v, c) (v', c') ->
+          order_concat [lazy (L.compare v v');
+                        lazy (Pervasives.compare c c')])
+
     let size = AddrMap.cardinal
   end
 
@@ -583,7 +607,7 @@ struct
       let store' = Store.join state.store a d in
       [{state with store = store'; env = env''; control = Exp e}]
     | FLetRec (a, v, e, env') ->
-      let store' = Store.join state.store a d in (* TODO: set *)
+      let store' = Store.set state.store a d in
       [{state with store = store'; control = Exp e}]
     | FIf (cons, alt, env') ->
       BatList.flatten (BatList.map (function
