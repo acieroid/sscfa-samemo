@@ -2,32 +2,55 @@ open Utils
 
 let param_gc = ref true
 let param_memo = ref true
+let k = 1
 
-module type Address_signature =
+module type AddressSignature =
 sig
   type t
+  type time
   (** Define the ordering between two addresses *)
   val compare : t -> t -> int
   (** Convert an address to a string *)
   val to_string : t -> string
   (** Allocate a new address from an integer *)
-  val alloc : int -> t
+  val alloc : int -> time -> t
 end
 
-module IntegerAddress : Address_signature =
+module type TimeSignature =
+sig
+  type t
+  type arg
+  val initial : t
+  val compare : t -> t -> int
+  val to_string : t -> string
+  val tick : arg  -> t -> t
+end
+
+module MakeAddress :
+  functor (T : TimeSignature) -> AddressSignature with type time = T.t =
+  functor (T : TimeSignature) ->
+    struct
+      type time = T.t
+      type t = int * T.t
+      let compare (tag, t) (tag', t') =
+        order_concat [lazy (Pervasives.compare tag tag');
+                      lazy (T.compare t t')]
+      let to_string (_, t) = T.to_string t
+      let alloc n t = (n, t)
+    end
+
+module KCFATime : TimeSignature with type arg = int =
 struct
-  type t = int
-  let compare = Pervasives.compare
-  let to_string = string_of_int
-  let alloc x =
-    let a = x mod 5 in
-    print_string ("allocated address " ^ (to_string a));
-    print_newline ();
-    a
+  type arg = int
+  type t = int list
+  let initial = []
+  let compare = compare_list Pervasives.compare
+  let to_string t = String.concat "," (BatList.map string_of_int t)
+  let tick x t = BatList.take k (x :: t)
 end
 
-module type Env_signature =
-  functor (A : Address_signature) ->
+module type EnvSignature =
+  functor (A : AddressSignature) ->
   sig
     type t
     (** The empty environment *)
@@ -44,8 +67,8 @@ module type Env_signature =
     val to_string : t -> string
   end
 
-module MapEnv : Env_signature =
-  functor (A : Address_signature) ->
+module MapEnv : EnvSignature =
+  functor (A : AddressSignature) ->
   struct
     module StringMap = BatMap.Make(BatString)
     type t = A.t StringMap.t
@@ -59,7 +82,7 @@ module MapEnv : Env_signature =
            (StringMap.bindings env))
   end
 
-module type Lattice_signature =
+module type LatticeSignature =
 sig
   (** The concrete type represented by this lattice *)
   type elt
@@ -91,7 +114,7 @@ module type LatticeArg = sig
 end
 
 module SetLattice : functor (V : LatticeArg)
-  -> Lattice_signature with type elt = V.t =
+  -> LatticeSignature with type elt = V.t =
   functor (V : LatticeArg) ->
   struct
     module VSet = BatSet.Make(V)
@@ -120,9 +143,9 @@ module SetLattice : functor (V : LatticeArg)
                    (VSet.fold (fun v acc -> (V.to_string v) :: acc) s [])
   end
 
-module type Store_signature =
-  functor (L : Lattice_signature) ->
-  functor (A : Address_signature) ->
+module type StoreSignature =
+  functor (L : LatticeSignature) ->
+  functor (A : AddressSignature) ->
   sig
     (** The store itself *)
     type t
@@ -142,9 +165,9 @@ module type Store_signature =
     val size : t -> int
   end
 
-module MapStore : Store_signature =
-  functor (L : Lattice_signature) ->
-  functor (A : Address_signature) ->
+module MapStore : StoreSignature =
+  functor (L : LatticeSignature) ->
+  functor (A : AddressSignature) ->
   struct
     module AddrMap = BatMap.Make(A)
     type t = L.t AddrMap.t
@@ -166,7 +189,7 @@ module MapStore : Store_signature =
     let size = AddrMap.cardinal
   end
 
-module type Lang_signature =
+module type LangSignature =
 sig
   (** An expression *)
   type exp
@@ -221,7 +244,7 @@ struct
     | True | False
     | Op of operator * aexp list
   and cexp =
-    | Call of aexp * aexp
+    | Call of aexp * aexp * int
     | Set of var * aexp
   and exp =
     | Let of var * exp *  exp
@@ -242,7 +265,7 @@ struct
     | AExp ae -> free_aexp ae
     | CExp ce -> free_cexp ce
   and free_cexp = function
-    | Call (f, ae) ->
+    | Call (f, ae, _) ->
       StringSet.union (free_aexp f) (free_aexp ae)
     | Set (v, ae) ->
       StringSet.add v (free_aexp ae)
@@ -277,7 +300,7 @@ struct
     | CExp ce -> string_of_cexp ce
     | AExp ae -> string_of_aexp ae
   and string_of_cexp = function
-    | Call (f, ae) ->
+    | Call (f, ae, _) ->
       Printf.sprintf "(%s %s)" (string_of_aexp f) (string_of_aexp ae)
     | Set (v, ae) ->
       Printf.sprintf "(set! %s %s)" v (string_of_aexp ae)
@@ -293,7 +316,8 @@ struct
       Printf.sprintf "(%s %s)"
         (string_of_op op) (String.concat " " (BatList.map string_of_aexp args))
 
-  module Address = IntegerAddress
+  module Time = KCFATime
+  module Address = MakeAddress(Time)
   type addr = Address.t
   module AddressSet = BatSet.Make(Address)
 
@@ -361,6 +385,7 @@ struct
     store: store;
     memo: memo;
     reads: reads;
+    time: Time.t
   }
   type frame =
     | FLet of var * exp * env
@@ -475,7 +500,7 @@ struct
       (d, addrs, ids)
 
   let alloc v state =
-    Address.alloc (Store.size state.store + 1)
+    Address.alloc 0 state.time
 end
 
 module type StackSummary =
@@ -533,7 +558,7 @@ struct
   let marked (_, procids) = procids
 end
 
-module ANFGarbageCollected : Lang_signature with type exp = ANFStructure.exp =
+module ANFGarbageCollected : LangSignature with type exp = ANFStructure.exp =
 struct
   include ANFStructure
   module Summary = ReachableAddressesAndMarksSummary
@@ -548,7 +573,7 @@ struct
 
   let inject e =
     ({control = Exp e; env = Env.empty; store = Store.empty;
-      memo = memo_empty; reads = reads_empty},
+      memo = memo_empty; reads = reads_empty; time = Time.initial},
      Summary.empty)
 
   let apply_kont f d state = match f with
@@ -568,12 +593,15 @@ struct
                       {state with control = Exp alt}]
         | V.Num | V.Clos _ | V.Undefined -> []) (Lattice.concretize d))
     | FMark (id, d_arg) ->
-      [{state with memo = match ProcIdMap.find id state.memo with
-           | Table table ->
-             ProcIdMap.add id (Table (ValueTable.add d_arg d table)) state.memo
-           | exception Not_found ->
-             ProcIdMap.add id (Table (ValueTable.add d_arg d ValueTable.empty)) state.memo
-           | Impure | Poly -> state.memo}]
+      if !param_memo then
+        [{state with memo = match ProcIdMap.find id state.memo with
+             | Table table ->
+               ProcIdMap.add id (Table (ValueTable.add d_arg d table)) state.memo
+             | exception Not_found ->
+               ProcIdMap.add id (Table (ValueTable.add d_arg d ValueTable.empty)) state.memo
+             | Impure | Poly -> state.memo}]
+      else
+        [state]
 
   let update_memo memo ids =
     if !param_memo then
@@ -598,7 +626,7 @@ struct
       reads
 
   let step_no_gc (state, ss) frame = match state.control with
-    | Exp (CExp (Call (f, ae))) ->
+    | Exp (CExp (Call (f, ae, tag))) ->
       let (rator, addrs, ids) = atomic_eval f state.env state.store in
       let (rand, addrs', ids') = atomic_eval ae state.env state.store in
       List.fold_left (fun acc -> function
@@ -624,11 +652,14 @@ struct
                    env = Env.extend env' v a;
                    store = Store.join state.store a rand;
                    memo = memo';
-                   reads = reads'}, ss)) :: acc
+                   reads = reads';
+                   time = Time.tick tag state.time}, ss)) :: acc
               | Some d ->
+                Printf.printf "hit\n%!";
                 (StackUnchanged, ({state with control = Val d;
                                               memo = memo';
-                                              reads = reads'}, ss)) :: acc
+                                              reads = reads';
+                                              time = Time.tick tag state.time}, ss)) :: acc
             end
           | V.Undefined | V.Num | V.True | V.False | V.Boolean -> acc)
         [] (Lattice.concretize rator)
@@ -740,8 +771,8 @@ struct
     | Val _ -> 0xDDFFDD
 end
 
-module type BuildDSG_signature =
-  functor (L : Lang_signature) ->
+module type BuildDSGSignature =
+  functor (L : LangSignature) ->
   sig
     module G : Graph.Sig.P
     module ConfSet : BatSet.S with type elt = L.conf
@@ -757,8 +788,8 @@ module type BuildDSG_signature =
     val print_stats : dsg -> unit
   end
 
-module BuildDSG : BuildDSG_signature =
-  functor (L : Lang_signature) ->
+module BuildDSG : BuildDSGSignature =
+  functor (L : LangSignature) ->
   struct
     module G = Graph.Persistent.Digraph.ConcreteBidirectionalLabeled(struct
         include L.ConfOrdering
@@ -968,25 +999,25 @@ let _ =
   let exp = let open ANFStructure in
     Let ("f",
          AExp (Lambda ("x", AExp (Var "x"))),
-         Let ("u", (CExp (Call (Var "f", Int 1))),
+         Let ("u", (CExp (Call (Var "f", Int 1, 1))),
               Let ("arg", (AExp (Op (Plus, [Int 3; Int 3]))),
-                   CExp (Call (Var "f", Var "arg"))))) in
+                   CExp (Call (Var "f", Var "arg", 2))))) in
   let gcipd = let open ANFStructure in
     Let ("id", AExp (Lambda ("x", AExp (Var "x"))),
     LetRec ("f", (AExp (Lambda ("n",
                                 (If (AExp (Op (LesserOrEqual, [Var "n"; Int 1])),
                                      AExp (Int 1),
-                                     Let ("fn1", CExp (Call (Var "f", Op (Minus, [Var "n"; Int 1]))),
+                                     Let ("fn1", CExp (Call (Var "f", Op (Minus, [Var "n"; Int 1]), 1)),
                                           AExp (Op (Times, [Var "n"; Var "fn1"])))))))),
     LetRec ("g", (AExp (Lambda ("n",
                                 If (AExp (Op (LesserOrEqual, [Var "n"; Int 1])),
                                     AExp (Int 1),
-                                    Let ("gn1", CExp (Call (Var "g", Op (Minus, [Var "n"; Int 1]))),
+                                    Let ("gn1", CExp (Call (Var "g", Op (Minus, [Var "n"; Int 1]), 2)),
                                          AExp (Op (Plus, [Op (Times, [Var "n"; Var "n"]); Var "gn1"]))))))),
-    Let ("idf", CExp (Call (Var "id", Var "f")),
-    Let ("f3", CExp (Call (Var "idf", Int 3)),
-    Let ("idg", CExp (Call (Var "id", Var "g")),
-    Let ("g4", CExp (Call (Var "idg", Int 4)),
+    Let ("idf", CExp (Call (Var "id", Var "f", 3)),
+    Let ("f3", CExp (Call (Var "idf", Int 3, 4)),
+    Let ("idg", CExp (Call (Var "id", Var "g", 5)),
+    Let ("g4", CExp (Call (Var "idg", Int 4, 6)),
     AExp (Op (Plus, [Var "f3"; Var "g4"]))))))))) in
   let dsg = DSG.build_dyck gcipd in
   DSG.output_dsg dsg "dsg.dot";
