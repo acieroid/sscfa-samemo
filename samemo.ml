@@ -196,8 +196,9 @@ module MapStore : StoreSignature =
         AddrMap.add a (v, One) store
 
     let lookup store a =
-      let (v, _) = AddrMap.find a store in
-      v
+      match AddrMap.find a store with
+      | v, _ -> v
+      | exception Not_found -> failwith ("Cannot find value at address " ^ (A.to_string a))
 
     let restrict store addrs =
       AddrMap.filter (fun a _ ->
@@ -416,7 +417,7 @@ struct
     | FLet of var * exp * env
     | FLetRec of Address.t * var * exp * env
     | FIf of exp * exp * env
-    | FMark of id * Lattice.t
+    | FMark of id * Lattice.t * env
 
   let create_id lam env store : id = (lam, env)
 
@@ -443,10 +444,11 @@ struct
                     lazy (Pervasives.compare alt alt');
                     lazy (Env.compare env env')]
     | FIf _, _ -> 1 | _, FIf _ -> -1
-    | FMark ((lam, env), d), FMark ((lam', env'), d') ->
+    | FMark ((lam, env), d, env2), FMark ((lam', env'), d', env2') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env');
-                    lazy (Lattice.compare d d')]
+                    lazy (Lattice.compare d d');
+                    lazy (Env.compare env2 env2')]
 
   let compare_control x y = match x, y with
     | Exp e, Exp e' -> Pervasives.compare e e'
@@ -569,13 +571,13 @@ struct
       AddressSet.add a (helper env (StringSet.remove v (free e)))
     | FIf (cons, alt, env) ->
       helper env (StringSet.union (free cons) (free alt))
-    | FMark (_, _) ->
+    | FMark (_, _, _) ->
       AddressSet.empty
 
   let push (addrs, procids) f =
     (AddressSet.union addrs (touch f),
      match f with
-     | FMark (id, _) -> ProcIdSet.add id procids
+     | FMark (id, _, _) -> ProcIdSet.add id procids
      | _ -> procids)
 
   let reachable (addrs, _) = addrs
@@ -609,24 +611,25 @@ struct
       [{state with store = store'; env = env''; control = Exp e}]
     | FLetRec (a, v, e, env') ->
       let store' = Store.set state.store a d in
-      [{state with store = store'; control = Exp e}]
+      [{state with store = store'; control = Exp e; env = env'}]
     | FIf (cons, alt, env') ->
       BatList.flatten (BatList.map (function
-        | V.True -> [{state with control = Exp cons}]
-        | V.False -> [{state with control = Exp alt}]
-        | V.Boolean -> [{state with control = Exp cons};
-                      {state with control = Exp alt}]
-        | V.Num | V.Clos _ | V.Undefined -> []) (Lattice.concretize d))
-    | FMark (id, d_arg) ->
+          | V.True -> [{state with control = Exp cons; env = env'}]
+          | V.False -> [{state with control = Exp alt; env = env'}]
+          | V.Boolean -> [{state with control = Exp cons; env = env'};
+                          {state with control = Exp alt; env = env'}]
+          | V.Num | V.Clos _ | V.Undefined -> []) (Lattice.concretize d))
+    | FMark (id, d_arg, env') ->
       if !param_memo then
-        [{state with memo = match ProcIdMap.find id state.memo with
+        [{state with memo = begin match ProcIdMap.find id state.memo with
              | Table table ->
                ProcIdMap.add id (Table (ValueTable.add d_arg d table)) state.memo
              | exception Not_found ->
                ProcIdMap.add id (Table (ValueTable.add d_arg d ValueTable.empty)) state.memo
-             | Impure | Poly -> state.memo}]
+             | Impure | Poly -> state.memo end;
+                env = env'}]
       else
-        [state]
+        [{state with env = env'}]
 
   let update_memo memo ids =
     if !param_memo then
@@ -671,7 +674,7 @@ struct
               | exception Not_found -> None in
             begin match cached with
               | None ->
-                let f = FMark (id, rand) in
+                let f = FMark (id, rand, state.env) in
                 (StackPush f,
                  ({control = Exp e;
                    env = Env.extend env' v a;
@@ -680,7 +683,7 @@ struct
                    reads = reads';
                    time = Time.tick tag state.time}, ss)) :: acc
               | Some d ->
-                Printf.printf "hit\n%!";
+                Printf.printf "Hit\n%!";
                 (StackUnchanged, ({state with control = Val d;
                                               memo = memo';
                                               reads = reads';
