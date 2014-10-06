@@ -303,10 +303,22 @@ struct
     let rec convert_aexp = function
       | Expr [Atom "lambda"; Expr [Atom arg]; body] ->
         Lambda (arg, convert_exp body)
+      | Expr [Atom "lambda"; Expr args_expr; body] as e ->
+        (* parse lambda into currified expressions *)
+        let args = BatList.rev_map (function
+            | Atom v -> v
+            | _ -> failwith ("Cannot parse aexp " ^ (string_of_sexpr [e])))
+            args_expr in
+        let exp = BatList.fold_left (fun acc arg -> AExp (Lambda (arg, acc)))
+            (convert_exp body) args in
+        begin match exp with
+          | AExp aexp -> aexp
+          | body -> Lambda ("dummy", body) (* no argument *)
+        end
       | Atom "#t" -> True
       | Atom "#f" -> False
       | Atom x -> begin try Int (int_of_string x) with
-          Failure "int_of_string" -> Var x
+            Failure "int_of_string" -> Var x
         end
       | Expr (Atom op :: args) when is_op op ->
         Op (to_op op, BatList.map convert_aexp args)
@@ -315,6 +327,8 @@ struct
       | Expr [Atom "set!"; Atom v; aexp] ->
         if is_op v then failwith ("cannot set! an operator: " ^ v) else
           Set (v, convert_aexp aexp)
+      | Expr [f] ->
+        Call (convert_aexp f, Int 0 (* dummy var *), new_id ())
       | Expr [f; arg] ->
         Call (convert_aexp f, convert_aexp arg, new_id ())
       | sexp -> failwith ("cannot parse cexp: " ^ (string_of_sexpr [sexp]))
@@ -328,7 +342,25 @@ struct
       | exp ->
         try CExp (convert_cexp exp) with
         | Failure f1 -> try AExp (convert_aexp exp) with
-          | Failure f2 -> failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2) in
+          | Failure f2 -> try begin match exp with
+            | Expr (f :: arg_expr :: args_expr) ->
+              (* parse call into currified call *)
+              let arg = convert_aexp arg_expr in
+              let args = BatList.map convert_aexp args_expr in
+              let faexp = convert_aexp f in
+              let rec build_exp n = function
+                | [] -> failwith "should not happen"
+                | arg :: [] ->
+                  CExp (Call (Var ("_call" ^ (string_of_int n)), arg, new_id ()))
+                | arg :: args ->
+                  Let ("_call" ^ (string_of_int (n+1)),
+                       CExp (Call (Var ("_call" ^ (string_of_int n)), arg, new_id ())),
+                       build_exp (n+1) args) in
+              Let ("_call0", CExp (Call (convert_aexp f, arg, new_id ())),
+                   build_exp 0 args)
+            | _ -> failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2)
+          end with Failure f3 ->
+            failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2 ^ ", " ^ f3) in
     convert_exp (BatList.hd (SExpr.parse_string s))
 
   let rec free = function
