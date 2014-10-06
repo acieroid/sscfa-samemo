@@ -284,7 +284,7 @@ struct
   and exp =
     | Let of var * exp *  exp
     | LetRec of var * exp * exp
-    | If of exp * exp * exp
+    | If of aexp * exp * exp
     | CExp of cexp
     | AExp of aexp
 
@@ -338,7 +338,7 @@ struct
       | Expr [Atom "letrec"; Expr [Expr [Atom v; exp]]; body] ->
         LetRec (v, convert_exp exp, convert_exp body)
       | Expr [Atom "if"; cond; cons; alt] ->
-        If (convert_exp cond, convert_exp cons, convert_exp alt)
+        If (convert_aexp cond, convert_exp cons, convert_exp alt)
       | exp ->
         try CExp (convert_cexp exp) with
         | Failure f1 -> try AExp (convert_aexp exp) with
@@ -347,7 +347,6 @@ struct
               (* parse call into currified call *)
               let arg = convert_aexp arg_expr in
               let args = BatList.map convert_aexp args_expr in
-              let faexp = convert_aexp f in
               let rec build_exp n = function
                 | [] -> failwith "should not happen"
                 | arg :: [] ->
@@ -369,7 +368,7 @@ struct
     | LetRec (v, exp, body) ->
       StringSet.remove v (StringSet.union (free exp) (free body))
     | If (cond, cons, alt) ->
-      free cond |>
+      free_aexp cond |>
       StringSet.union (free cons) |>
       StringSet.union (free alt)
     | AExp ae -> free_aexp ae
@@ -407,7 +406,7 @@ struct
         v (string_of_exp exp) (string_of_exp body)
     | If (cond, cons, alt) ->
       Printf.sprintf "(if %s %s %s)"
-        (string_of_exp cond) (string_of_exp cons) (string_of_exp alt)
+        (string_of_aexp cond) (string_of_exp cons) (string_of_exp alt)
     | CExp ce -> string_of_cexp ce
     | AExp ae -> string_of_aexp ae
   and string_of_cexp = function
@@ -501,7 +500,6 @@ struct
   type frame =
     | FLet of var * exp * env
     | FLetRec of Address.t * var * exp * env
-    | FIf of exp * exp * env
     | FMark of id * Lattice.t * env
 
   let create_id lam env store : id = (lam, env)
@@ -509,7 +507,6 @@ struct
   let string_of_frame = function
     | FLet (v, e, env) -> Printf.sprintf "Let(%s)" v
     | FLetRec (a, v, e, env) -> Printf.sprintf "LetRec(%s)" v
-    | FIf _ ->  "If"
     | FMark _ -> "Mark"
 
   let compare_frame x y = match x, y with
@@ -524,11 +521,6 @@ struct
                     lazy (Pervasives.compare exp exp');
                     lazy (Env.compare env env')]
     | FLetRec _, _ -> 1 | _, FLetRec _ -> -1
-    | FIf (cons, alt, env), FIf (cons', alt', env') ->
-      order_concat [lazy (Pervasives.compare cons cons');
-                    lazy (Pervasives.compare alt alt');
-                    lazy (Env.compare env env')]
-    | FIf _, _ -> 1 | _, FIf _ -> -1
     | FMark ((lam, env), d, env2), FMark ((lam', env'), d', env2') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env');
@@ -654,8 +646,6 @@ struct
       helper env (StringSet.remove v (free e))
     | FLetRec (a, v, e, env) ->
       AddressSet.add a (helper env (StringSet.remove v (free e)))
-    | FIf (cons, alt, env) ->
-      helper env (StringSet.union (free cons) (free alt))
     | FMark (_, _, _) ->
       AddressSet.empty
 
@@ -697,13 +687,6 @@ struct
     | FLetRec (a, v, e, env') ->
       let store' = Store.set state.store a d in
       [{state with store = store'; control = Exp e; env = env'}]
-    | FIf (cons, alt, env') ->
-      BatList.flatten (BatList.map (function
-          | V.True -> [{state with control = Exp cons; env = env'}]
-          | V.False -> [{state with control = Exp alt; env = env'}]
-          | V.Boolean -> [{state with control = Exp cons; env = env'};
-                          {state with control = Exp alt; env = env'}]
-          | V.Num | V.Clos _ | V.Undefined -> []) (Lattice.concretize d))
     | FMark (id, d_arg, env') ->
       if !param_memo then
         [{state with memo = begin match ProcIdMap.find id state.memo with
@@ -810,9 +793,15 @@ struct
       [(StackPush f, ({state with control = Exp exp;
                                   env = env';
                                   store = store'}, Summary.push ss f))]
-    | Exp (If (cons, cond, alt)) ->
-      let f = FIf (cond, alt, state.env) in
-      [(StackPush f, ({state with control = Exp cons}, Summary.push ss f))]
+    | Exp (If (cond, cons, alt)) ->
+      let (d, addrs, ids) = atomic_eval cond state.env state.store in
+      let states = BatList.flatten (BatList.map (function
+          | V.True -> [{state with control = Exp cons}]
+          | V.False -> [{state with control = Exp alt}]
+          | V.Boolean -> [{state with control = Exp cons};
+                          {state with control = Exp alt}]
+          | V.Num | V.Clos _ | V.Undefined -> []) (Lattice.concretize d)) in
+      BatList.map (fun s -> (StackUnchanged "e", (s, ss))) states
     | Val v -> begin match frame with
         | Some ((_, ss'), f) ->
           BatList.map (fun state -> (StackPop f, (state, ss'))) (apply_kont f v state)
