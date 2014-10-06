@@ -1,7 +1,7 @@
 open Utils
 
-let param_gc = ref false
-let param_memo = ref false
+let param_gc = ref true
+let param_memo = ref true
 let k = 1
 
 module type AddressSignature =
@@ -465,7 +465,7 @@ struct
        lazy (Env.compare state.env state'.env);
        lazy (Store.compare state.store state'.store)]
   let string_of_state state =
-    string_of_control state.control
+    (string_of_control state.control) ^ "@" ^ (Time.to_string state.time)
 
   type stack_change =
     | StackPop of frame
@@ -1047,7 +1047,15 @@ let _ =
     Let ("idg", CExp (Call (Var "id", Var "g", 5)),
     Let ("g4", CExp (Call (Var "idg", Int 4, 6)),
     AExp (Op (Plus, [Var "f3"; Var "g4"]))))))))) in
-  let dsg = DSG.build_dyck gcipd in
+  let fib = let open ANFStructure in
+    LetRec ("fib", AExp (Lambda ("n",
+                                 If (AExp (Op (LesserOrEqual, [Var "n"; Int 2])),
+                                     AExp (Var "n"),
+                                     Let ("fibn1", CExp (Call (Var "fib", Op (Minus, [Var "n"; Int 1]), 1)),
+                                          Let ("fibn2", CExp (Call (Var "fib", Op (Minus, [Var "n"; Int 2]), 2)),
+                                               AExp (Op (Plus, [Var "fibn1"; Var "fibn2"]))))))),
+            CExp (Call (Var "fib", Int 4, 3))) in
+  let dsg = DSG.build_dyck fib in
   DSG.output_dsg dsg "dsg.dot";
   DSG.output_ecg dsg "ecg.dot";
   DSG.print_stats dsg
