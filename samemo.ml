@@ -2,6 +2,7 @@ open Utils
 
 let param_gc = ref false
 let param_memo = ref false
+let counting = ref false
 let k = ref 1
 
 let speclist = [
@@ -11,6 +12,8 @@ let speclist = [
   "Abstract memoization";
   "-k", Arg.Set_int k,
   "Polyvariance";
+  "-counting", Arg.Set counting,
+  "Abstract counting"
 ]
 
 module type AddressSignature =
@@ -201,18 +204,21 @@ module MapStore : StoreSignature =
     let join store a v =
       if AddrMap.mem a store then
         let (v', count) = AddrMap.find a store in
-        AddrMap.add a ((L.join v v'), One) store
+        AddrMap.add a ((L.join v v'), if !counting then Infinity else One) store
       else
         AddrMap.add a (v, One) store
 
     let set store a v =
-      if AddrMap.mem a store then
-        let (v', count) = AddrMap.find a store in
-        match count with
-        | One -> AddrMap.add a (v, One) store
-        | Infinity -> join store a v
+      if !counting then
+        if AddrMap.mem a store then
+          let (v', count) = AddrMap.find a store in
+          match count with
+          | One -> AddrMap.add a (v, One) store
+          | Infinity -> join store a v
+        else
+          AddrMap.add a (v, One) store
       else
-        AddrMap.add a (v, One) store
+        join store a v
 
     let lookup store a =
       match AddrMap.find a store with
@@ -689,7 +695,7 @@ struct
       let store' = Store.join state.store a d in
       [{state with store = store'; env = env''; control = Exp e}]
     | FLetRec (a, v, e, env') ->
-      let store' = Store.join state.store a d in
+      let store' = Store.set state.store a d in
       [{state with store = store'; control = Exp e; env = env'}]
     | FMark (id, d_arg, env') ->
       if !param_memo then
@@ -778,7 +784,7 @@ struct
           | V.Clos ((var, exp), env') ->
             let id = create_id (var, exp) env' state.store in
             let addr = Env.lookup state.env v in
-            let store' = Store.join state.store addr clo in (* TODO: set *)
+            let store' = Store.set state.store addr clo in
             let v = Lattice.abst [V.Undefined] in
             let reads_ids = (AddressMap.find addr state.reads) in
             let memo' = update_memo state.memo ids |>
