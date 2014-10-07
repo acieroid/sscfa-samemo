@@ -3,7 +3,8 @@ open Utils
 let param_gc = ref false
 let param_memo = ref false
 let counting = ref false
-let k = ref 1
+let kcfa = ref false
+let k = ref 0
 
 let speclist = [
   "-gc", Arg.Set param_gc,
@@ -13,7 +14,9 @@ let speclist = [
   "-k", Arg.Set_int k,
   "Polyvariance";
   "-counting", Arg.Set counting,
-  "Abstract counting"
+  "Abstract counting";
+  "-kcfa", Arg.Set kcfa,
+  "Use k-CFA instead of m-CFA";
 ]
 
 module type AddressSignature =
@@ -614,7 +617,7 @@ struct
       (d, addrs, ids)
 
   let alloc v state =
-    Address.alloc v 0 (Env.time state.env)
+    Address.alloc v 0 (if !kcfa then state.time else (Env.time state.env))
 end
 
 module type StackSummary =
@@ -764,17 +767,17 @@ struct
                       (state.env, state.store) (BatList.combine vs rands) in
                   (StackPush f,
                    ({control = Exp e;
-                     env = env';
+                     env = if not !kcfa then Env.call tag env' else env';
                      store = store';
                      memo = memo';
                      reads = reads';
-                     time = Time.tick tag state.time}, ss)) :: acc
+                     time = if !kcfa then Time.tick tag state.time else state.time}, ss)) :: acc
               | Some d ->
                 Printf.printf "Hit\n%!";
                 (StackUnchanged "memo", ({state with control = Val d;
                                                      memo = memo';
                                                      reads = reads';
-                                                     time = Time.tick tag state.time}, ss)) :: acc
+                                                     time = if !kcfa then Time.tick tag state.time else state.time}, ss)) :: acc
             end
           | V.Undefined | V.Num | V.True | V.False | V.Boolean -> acc)
         [] (Lattice.concretize rator)
