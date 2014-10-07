@@ -807,7 +807,7 @@ struct
     | Exp (LetRec (v, exp, body)) ->
       let a = alloc v state in
       let env' = Env.extend state.env v a in
-      let store' = Store.join state.store a (Lattice.abst [V.Undefined]) in
+      let store' = Store.join state.store a Lattice.bot in
       let f = FLetRec (a, v, body, env') in
       [(StackPush f, ({state with control = Exp exp;
                                   env = env';
@@ -946,7 +946,7 @@ module BuildDSG =
       let vertex_name (state : V.t) =
         (string_of_int (node_id state))
       let vertex_attributes (state : V.t) =
-        [`Label ((string_of_int (node_id state)) ^ (BatString.slice ~last:20 (L.string_of_conf state)));
+        [`Label (BatString.slice ~last:20 (L.string_of_conf state));
          `Style `Filled;
          `Fillcolor (L.conf_color state)]
       let default_vertex_attributes _ = []
