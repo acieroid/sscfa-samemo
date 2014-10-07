@@ -233,7 +233,7 @@ module MapStore : StoreSignature =
           if (List.mem a addrs) then
             true
           else begin
-            print_endline ("reclaim(" ^ (A.to_string a) ^ ")");
+            (* print_endline ("reclaim(" ^ (A.to_string a) ^ ")"); *)
             false end) store
     let compare =
       AddrMap.compare (fun (v, c) (v', c') ->
@@ -773,7 +773,7 @@ struct
                      reads = reads';
                      time = if !kcfa then Time.tick tag state.time else state.time}, ss)) :: acc
               | Some d ->
-                Printf.printf "Hit\n%!";
+                (* Printf.printf "Hit\n%!"; *)
                 (StackUnchanged "memo", ({state with control = Val d;
                                                      memo = memo';
                                                      reads = reads';
