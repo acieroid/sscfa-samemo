@@ -283,7 +283,7 @@ struct
     | Plus | Minus | Times | Divide
     | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal
     | Id
-  type lam = var * exp
+  type lam = var list * exp
   and aexp =
     | Var of var
     | Lambda of lam
@@ -291,7 +291,7 @@ struct
     | True | False
     | Op of operator * aexp list
   and cexp =
-    | Call of aexp * aexp * int
+    | Call of aexp * aexp list * int
     | Set of var * aexp
   and exp =
     | Let of var * exp *  exp
@@ -313,20 +313,11 @@ struct
       | "id" -> Id | op -> failwith ("unknown op: " ^ op) in
     let open SExpr in
     let rec convert_aexp = function
-      | Expr [Atom "lambda"; Expr [Atom arg]; body] ->
-        Lambda (arg, convert_exp body)
-      | Expr [Atom "lambda"; Expr args_expr; body] as e ->
-        (* parse lambda into currified expressions *)
-        let args = BatList.rev_map (function
+      | Expr [Atom "lambda"; Expr args; body] ->
+        Lambda (BatList.map (function
             | Atom v -> v
-            | _ -> failwith ("Cannot parse aexp " ^ (string_of_sexpr [e])))
-            args_expr in
-        let exp = BatList.fold_left (fun acc arg -> AExp (Lambda (arg, acc)))
-            (convert_exp body) args in
-        begin match exp with
-          | AExp aexp -> aexp
-          | body -> Lambda ("dummy", body) (* no argument *)
-        end
+            | e -> failwith ("invalid argument: " ^  (string_of_sexpr [e])))
+            args, convert_exp body)
       | Atom "#t" -> True
       | Atom "#f" -> False
       | Atom x -> begin try Int (int_of_string x) with
@@ -339,10 +330,9 @@ struct
       | Expr [Atom "set!"; Atom v; aexp] ->
         if is_op v then failwith ("cannot set! an operator: " ^ v) else
           Set (v, convert_aexp aexp)
-      | Expr [f] ->
-        Call (convert_aexp f, Int 0 (* dummy var *), new_id ())
-      | Expr [f; arg] ->
-        Call (convert_aexp f, convert_aexp arg, new_id ())
+      | Expr (Atom op :: _) when is_op op -> failwith "operator call is an aexp"
+      | Expr (f :: args) ->
+        Call (convert_aexp f, BatList.map convert_aexp args, new_id ())
       | sexp -> failwith ("cannot parse cexp: " ^ (string_of_sexpr [sexp]))
     and convert_exp = function
       | Expr [Atom "let"; Expr [Expr [Atom v; exp]]; body] ->
@@ -354,24 +344,7 @@ struct
       | exp ->
         try CExp (convert_cexp exp) with
         | Failure f1 -> try AExp (convert_aexp exp) with
-          | Failure f2 -> try begin match exp with
-            | Expr (f :: arg_expr :: args_expr) ->
-              (* parse call into currified call *)
-              let arg = convert_aexp arg_expr in
-              let args = BatList.map convert_aexp args_expr in
-              let rec build_exp n = function
-                | [] -> failwith "should not happen"
-                | arg :: [] ->
-                  CExp (Call (Var ("_call" ^ (string_of_int n)), arg, new_id ()))
-                | arg :: args ->
-                  Let ("_call" ^ (string_of_int (n+1)),
-                       CExp (Call (Var ("_call" ^ (string_of_int n)), arg, new_id ())),
-                       build_exp (n+1) args) in
-              Let ("_call0", CExp (Call (convert_aexp f, arg, new_id ())),
-                   build_exp 0 args)
-            | _ -> failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2)
-          end with Failure f3 ->
-            failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2 ^ ", " ^ f3) in
+          | Failure f2 -> failwith ("cannot parse exp: " ^ f1 ^ ", " ^ f2) in
     convert_exp (BatList.hd (SExpr.parse_string s))
 
   let rec free = function
@@ -386,13 +359,15 @@ struct
     | AExp ae -> free_aexp ae
     | CExp ce -> free_cexp ce
   and free_cexp = function
-    | Call (f, ae, _) ->
-      StringSet.union (free_aexp f) (free_aexp ae)
+    | Call (f, args, _) ->
+      BatList.fold_left (fun acc ae ->
+          StringSet.union acc (free_aexp ae))
+        (free_aexp f) args
     | Set (v, ae) ->
       StringSet.add v (free_aexp ae)
   and free_aexp = function
     | Var v -> StringSet.singleton v
-    | Lambda (v, exp) -> StringSet.remove v (free exp)
+    | Lambda (args, exp) -> StringSet.diff (free exp) (StringSet.of_list args)
     | Op (op, args) ->
       BatList.fold_left (fun acc arg -> StringSet.union acc (free_aexp arg))
         StringSet.empty args
@@ -422,14 +397,16 @@ struct
     | CExp ce -> string_of_cexp ce
     | AExp ae -> string_of_aexp ae
   and string_of_cexp = function
-    | Call (f, ae, _) ->
-      Printf.sprintf "(%s %s)" (string_of_aexp f) (string_of_aexp ae)
+    | Call (f, args, _) ->
+      Printf.sprintf "(%s %s)" (string_of_aexp f)
+        (BatString.concat " " (BatList.map string_of_aexp args))
     | Set (v, ae) ->
       Printf.sprintf "(set! %s %s)" v (string_of_aexp ae)
   and string_of_aexp = function
     | Var v -> v
-    | Lambda (v, e) ->
-      Printf.sprintf "(lambda (%s) %s)" v (string_of_exp e)
+    | Lambda (args, e) ->
+      Printf.sprintf "(lambda (%s) %s)"
+        (BatString.concat " " args) (string_of_exp e)
     | Int n ->
       string_of_int n
     | True -> "#t"
@@ -486,7 +463,11 @@ struct
   module ProcIdMap = BatMap.Make(ProcIdOrdering)
   module ProcIdSet = BatSet.Make(ProcIdOrdering)
 
-  module ValueTable = BatMap.Make(Lattice)
+  module LatticeList = struct
+    type t = Lattice.t list
+    let compare = compare_list Lattice.compare
+  end
+  module ValueTable = BatMap.Make(LatticeList)
   type table =
     | Impure
     | Poly
@@ -519,7 +500,7 @@ struct
   type frame =
     | FLet of var * exp * env
     | FLetRec of Address.t * var * exp * env
-    | FMark of id * Lattice.t * env
+    | FMark of id * LatticeList.t * env
 
   let create_id lam env store : id = (lam, env)
 
@@ -543,7 +524,7 @@ struct
     | FMark ((lam, env), d, env2), FMark ((lam', env'), d', env2') ->
       order_concat [lazy (Pervasives.compare lam lam');
                     lazy (Env.compare env env');
-                    lazy (Lattice.compare d d');
+                    lazy (LatticeList.compare d d');
                     lazy (Env.compare env2 env2')]
 
   let compare_control x y = match x, y with
@@ -605,7 +586,8 @@ struct
   let rec atomic_eval atom env store =
     match atom with
     | Var var ->
-      let a = Env.lookup env var in
+      let a = try Env.lookup env var with
+        | Not_found -> failwith ("Variable not found: " ^ var) in
       (Store.lookup store a, AddressSet.singleton a, ProcIdSet.empty)
     | Lambda lam ->
       (Lattice.abst [V.Clos (lam, env)], AddressSet.empty,
@@ -744,34 +726,43 @@ struct
       reads
 
   let step_no_gc (state, ss) frame = match state.control with
-    | Exp (CExp (Call (f, ae, tag))) ->
-      let (rator, addrs, ids) = atomic_eval f state.env state.store in
-      let (rand, addrs', ids') = atomic_eval ae state.env state.store in
+    | Exp (CExp (Call (f, args, tag))) ->
+      let (rator, a, i) = atomic_eval f state.env state.store in
+      let (revrands, addrs, ids) = BatList.fold_left (fun (rands, addrs, ids) ae ->
+          let (rand, a, i) = atomic_eval ae state.env state.store in
+          (rand :: rands, AddressSet.union addrs a, ProcIdSet.union ids i))
+          ([], a, i) args in
+      let rands = BatList.rev revrands in
       List.fold_left (fun acc -> function
-          | V.Clos ((v, e), env') ->
-            let a = alloc v state in
+          | V.Clos ((vs, e) as lam, env') ->
             (* TODO: don't call create_id anywhere else than in the atomic evaluator *)
-            let id = create_id (v, e) env' state.store in
-            let memo' =  update_memo state.memo (ProcIdSet.union ids ids') in
-            let reads' = update_reads state.reads
-                (AddressSet.union addrs addrs') (Summary.marked ss) in
+            let id = create_id lam env' state.store in
+            let memo' =  update_memo state.memo ids in
+            let reads' = update_reads state.reads addrs (Summary.marked ss) in
             let cached = match ProcIdMap.find id state.memo with
               | Table table ->
-                begin try Some (ValueTable.find rand table)
+                begin try Some (ValueTable.find rands table)
                   with Not_found -> None
                 end
               | Impure | Poly -> None
               | exception Not_found -> None in
             begin match cached with
               | None ->
-                let f = FMark (id, rand, state.env) in
-                (StackPush f,
-                 ({control = Exp e;
-                   env = Env.call tag (Env.extend env' v a);
-                   store = Store.join state.store a rand;
-                   memo = memo';
-                   reads = reads';
-                   time = Time.tick tag state.time}, ss)) :: acc
+                let f = FMark (id, rands, state.env) in
+                if BatList.length vs != BatList.length rands then
+                  [] (* arity mismatch *)
+                else
+                  let (env', store') = BatList.fold_left (fun (env, store) (v, rand) ->
+                      let a = alloc v state in
+                      (Env.extend env v a, Store.join store a rand))
+                      (state.env, state.store) (BatList.combine vs rands) in
+                  (StackPush f,
+                   ({control = Exp e;
+                     env = env';
+                     store = store';
+                     memo = memo';
+                     reads = reads';
+                     time = Time.tick tag state.time}, ss)) :: acc
               | Some d ->
                 Printf.printf "Hit\n%!";
                 (StackUnchanged "memo", ({state with control = Val d;
@@ -912,7 +903,7 @@ module type BuildDSGSignature =
     val print_stats : dsg -> unit
   end
 
-module BuildDSG : BuildDSGSignature =
+module BuildDSG =
   functor (L : LangSignature) ->
   struct
     module G = Graph.Persistent.Digraph.ConcreteBidirectionalLabeled(struct
@@ -949,7 +940,7 @@ module BuildDSG : BuildDSGSignature =
       let vertex_name (state : V.t) =
         (string_of_int (node_id state))
       let vertex_attributes (state : V.t) =
-        [`Label (BatString.slice ~last:20 (L.string_of_conf state));
+        [`Label ((string_of_int (node_id state)) ^ (BatString.slice ~last:20 (L.string_of_conf state)));
          `Style `Filled;
          `Fillcolor (L.conf_color state)]
       let default_vertex_attributes _ = []
