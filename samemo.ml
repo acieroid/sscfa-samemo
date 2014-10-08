@@ -787,7 +787,7 @@ struct
                   let (env', store') = BatList.fold_left (fun (env, store) (v, rand) ->
                       let a = alloc v state in
                       (Env.extend env v a, Store.join store a rand))
-                      (state.env, state.store) (BatList.combine vs rands) in
+                      (env', state.store) (BatList.combine vs rands) in
                   (StackPush f,
                    ({control = Exp e;
                      env = if not !kcfa then Env.call tag env' else env';
