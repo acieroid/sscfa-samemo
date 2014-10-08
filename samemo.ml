@@ -21,7 +21,9 @@ let speclist = [
 
 module type AddressSignature =
 sig
+  (** An address *)
   type t
+  (** Timestamp used as component of addresses *)
   type time
   (** Define the ordering between two addresses *)
   val compare : t -> t -> int
@@ -87,7 +89,7 @@ module type EnvSignature =
   end
 
 module MapEnv : EnvSignature =
-  functor (A : AddressSignature) -> 
+  functor (A : AddressSignature) ->
   functor (T : TimeSignature) ->
   struct
     module StringMap = BatMap.Make(BatString)
@@ -794,16 +796,16 @@ struct
                         ProcIdMap.add id Impure |>
                         ProcIdMap.filter (fun id _ -> not (ProcIdSet.mem id reads_ids)) in
             (StackUnchanged "e", ({state with control = Val v; store = store';
-                                          memo = memo';
-                                          reads = update_reads state.reads addrs
-                                              (Summary.marked ss)}, ss)) :: acc
+                                              memo = memo';
+                                              reads = update_reads state.reads addrs
+                                                  (Summary.marked ss)}, ss)) :: acc
           | _ -> acc) [] (Lattice.concretize clo)
     | Exp (AExp ae) ->
       let (clo, addrs, ids) = atomic_eval ae state.env state.store in
       [(StackUnchanged "e", ({state with control = Val clo;
-                                     memo = update_memo state.memo ids;
-                                     reads = update_reads state.reads addrs
-                                         (Summary.marked ss)}, ss))]
+                                         memo = update_memo state.memo ids;
+                                         reads = update_reads state.reads addrs
+                                             (Summary.marked ss)}, ss))]
     | Exp (Let (v, exp, body)) ->
       let f = FLet (v, body, state.env) in
       [(StackPush f, ({state with control = Exp exp}, Summary.push ss f))]
@@ -842,9 +844,16 @@ struct
       vars AddressSet.empty
 
   let root ((state, ss) : conf) = match state.control with
-    | Exp e -> AddressSet.union (Summary.reachable ss)
-                 (addresses_of_vars (free e) state.env)
-    | Val _ -> Summary.reachable ss
+    | Exp e ->
+      AddressSet.union (Summary.reachable ss)
+        (addresses_of_vars (free e) state.env)
+    | Val v ->
+      (BatList.fold_left (fun acc -> function
+           | V.Clos ((v, e), env) ->
+             AddressSet.union acc (addresses_of_vars
+                                     (StringSet.diff (free e) (StringSet.of_list v))
+                                     env)
+           | _ -> acc) (Summary.reachable ss) (Lattice.concretize v))
 
   let touch (lam, env) =
     addresses_of_vars (free (AExp (Lambda lam))) env
