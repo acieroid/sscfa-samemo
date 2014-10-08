@@ -100,7 +100,9 @@ module MapEnv : EnvSignature =
     let empty = {env = StringMap.empty; time = T.initial}
     let extend t var addr =
       {t with env = StringMap.add var addr t.env}
-    let lookup t var = StringMap.find var t.env
+    let lookup t var =
+      try StringMap.find var t.env
+      with Not_found -> failwith ("Cannot find variable " ^ var)
     let compare t t' =
       order_concat [lazy (StringMap.compare A.compare t.env t'.env);
                     lazy (T.compare t.time t'.time)]
@@ -293,7 +295,7 @@ struct
   type operator =
     | Plus | Minus | Times | Divide
     | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal
-    | Id
+    | Not | Id
   type lam = var list * exp
   and aexp =
     | Var of var
@@ -315,12 +317,12 @@ struct
     let i = ref 0 in
     let new_id () = i := !i + 1; !i in
     let is_op = function
-      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "=" -> true
+      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "=" | "not" -> true
       | _ -> false in
     let to_op = function
       | "+" -> Plus | "-" -> Minus | "*" -> Times | "/" -> Divide
       | "<" -> Lesser | "<=" -> LesserOrEqual | ">" -> Greater | ">=" -> GreaterOrEqual
-      | "=" -> Equal
+      | "=" -> Equal | "not" -> Not
       | "id" -> Id | op -> failwith ("unknown op: " ^ op) in
     let open SExpr in
     let rec convert_aexp = function
@@ -394,6 +396,7 @@ struct
     | Greater -> ">"
     | GreaterOrEqual -> ">="
     | Equal -> "="
+    | Not -> "not"
     | Id -> "id"
   let rec string_of_exp = function
     | Let (v, exp, body) ->
@@ -589,7 +592,7 @@ struct
 
   let apply_op op args = match op with
     | Plus | Minus | Times | Divide -> Lattice.abst [V.Num]
-    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal -> Lattice.abst [V.Boolean]
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal | Not -> Lattice.abst [V.Boolean]
     | Id -> match args with
       | x :: [] -> x
       | _ -> failwith "Invalid numbre of arguments to 'id'"
