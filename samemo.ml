@@ -1,5 +1,11 @@
 open Utils
 
+(* To fix:
+  - churchNums.scm, rotate.scm, sat.scm: fails due to multiple arguments not being correctly bound
+  - cpstak.scm, primtest.scm: loops
+  - loop2.scm: loops with k = 1?
+*)
+
 let param_gc = ref false
 let param_memo = ref false
 let counting = ref false
