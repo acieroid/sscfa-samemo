@@ -293,8 +293,8 @@ module ANFStructure =
 struct
   type var = string
   type operator =
-    | Plus | Minus | Times | Divide
-    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal
+    | Plus | Minus | Times | Divide | Modulo | Ceiling | Log | Random
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal | Evenp | Oddp
     | Not | Id
   type lam = var list * exp
   and aexp =
@@ -317,13 +317,17 @@ struct
     let i = ref 0 in
     let new_id () = i := !i + 1; !i in
     let is_op = function
-      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "=" | "not" -> true
+      | "+" | "-" | "*" | "/" | "<" | "<=" | ">" | ">=" | "=" | "log"
+      | "not" | "modulo" | "ceiling" | "random"
+      | "even?" | "odd?" -> true
       | _ -> false in
     let to_op = function
       | "+" -> Plus | "-" -> Minus | "*" -> Times | "/" -> Divide
-      | "<" -> Lesser | "<=" -> LesserOrEqual | ">" -> Greater | ">=" -> GreaterOrEqual
-      | "=" -> Equal | "not" -> Not
-      | "id" -> Id | op -> failwith ("unknown op: " ^ op) in
+      | "modulo" -> Modulo | "ceiling" -> Ceiling | "log" -> Log
+      | "random" -> Random | "<" -> Lesser | "<=" -> LesserOrEqual
+      | ">" -> Greater | ">=" -> GreaterOrEqual | "=" -> Equal | "not" -> Not
+      | "even?" -> Evenp | "odd?" -> Oddp | "id" -> Id
+      | op -> failwith ("unknown op: " ^ op) in
     let open SExpr in
     let rec convert_aexp = function
       | Expr [Atom "lambda"; Expr args; body] ->
@@ -391,12 +395,18 @@ struct
     | Minus -> "-"
     | Times -> "*"
     | Divide -> "/"
+    | Modulo -> "modulo"
+    | Ceiling -> "ceiling"
+    | Log -> "log"
+    | Random -> "random"
     | Lesser -> "<"
     | LesserOrEqual -> "<="
     | Greater -> ">"
     | GreaterOrEqual -> ">="
     | Equal -> "="
     | Not -> "not"
+    | Evenp -> "even?"
+    | Oddp -> "odd?"
     | Id -> "id"
   let rec string_of_exp = function
     | Let (v, exp, body) ->
@@ -591,8 +601,9 @@ struct
   end
 
   let apply_op op args = match op with
-    | Plus | Minus | Times | Divide -> Lattice.abst [V.Num]
-    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal | Not -> Lattice.abst [V.Boolean]
+    | Plus | Minus | Times | Divide | Modulo | Ceiling | Log | Random -> Lattice.abst [V.Num]
+    | Lesser | LesserOrEqual | Greater | GreaterOrEqual | Equal | Not
+    | Evenp | Oddp -> Lattice.abst [V.Boolean]
     | Id -> match args with
       | x :: [] -> x
       | _ -> failwith "Invalid numbre of arguments to 'id'"
