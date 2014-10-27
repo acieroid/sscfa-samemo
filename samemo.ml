@@ -1,10 +1,10 @@
 open Utils
 
 (* To fix:
-  - churchNums.scm, sat.scm: fails due to multiple arguments not being correctly bound
-  - cpstak.scm, primtest.scm: loops
-  - loop2.scm: loops with k = 1?
-  - fib.scm: GC error with k = 1, gc and no memo
+  - primtest.scm: loops
+  - loop2.scm: GC error with -gc -k 1
+  - fib.scm: GC error -gc -k 1
+  - churchNums.scm: GC error with -gc
 *)
 
 let param_gc = ref false
@@ -244,7 +244,7 @@ module MapStore : StoreSignature =
           if (List.mem a addrs) then
             true
           else begin
-            (* print_endline ("reclaim(" ^ (A.to_string a) ^ ")"); *)
+            print_endline ("reclaim(" ^ (A.to_string a) ^ ")");
             false end) store
     let compare =
       AddrMap.compare (fun (v, c) (v', c') ->
@@ -269,6 +269,8 @@ sig
   val string_of_conf : conf -> string
   (** Ordering between configurations *)
   module ConfOrdering : BatInterfaces.OrderedType with type t = conf
+
+  exception Failed of conf * conf * exn
 
   (** A stack frame *)
   type frame
@@ -450,6 +452,9 @@ struct
   module Address = MakeAddress(Time)
   type addr = Address.t
   module AddressSet = BatSet.Make(Address)
+
+  let string_of_addrset s =
+    String.concat "," (BatList.map Address.to_string (AddressSet.elements s))
 
   module Env = MapEnv(Address)(Time)
   type env = Env.t
@@ -686,6 +691,7 @@ struct
       AddressSet.empty
 
   let push (addrs, procids) f =
+    Printf.printf "Pushing %s\n%!" (string_of_addrset addrs);
     (AddressSet.union addrs (touch f),
      match f with
      | FMark (id, _, _) -> ProcIdSet.add id procids
@@ -701,6 +707,7 @@ struct
   include ANFStructure
   module Summary = ReachableAddressesAndMarksSummary
   type conf = state * Summary.t
+  exception Failed of conf * conf * exn
 
   let compare_conf (s1, ss1) (s2, ss2) =
     order_concat [lazy (compare_state s1 s2);
@@ -866,6 +873,7 @@ struct
 
   let root ((state, ss) : conf) = match state.control with
     | Exp e ->
+      Printf.printf "summary is %s\n%!" (string_of_addrset (Summary.reachable ss));
       AddressSet.union (Summary.reachable ss)
         (addresses_of_vars (free e) state.env)
     | Val v ->
@@ -897,7 +905,7 @@ struct
         if AddressSet.mem a acc then
           aux (AddressSet.remove a todo) acc
         else
-          let addrs = touching_rel1 addr store in
+          let addrs = touching_rel1 a store in
           aux (AddressSet.remove a (AddressSet.union addrs todo))
             (AddressSet.add a (AddressSet.union addrs acc))
     in
@@ -905,20 +913,32 @@ struct
 
   let reachable (conf : conf) =
     let (state, _) = conf in
-    AddressSet.fold (fun a acc ->
+    Printf.printf "Checking reachable addresses for %s\n%!" (string_of_conf conf);
+    Printf.printf "Root is %s\n%!" (string_of_addrset (root conf));
+    let r = AddressSet.fold (fun a acc ->
         AddressSet.union acc (touching_rel a state.store))
-      (root conf) AddressSet.empty
+        (root conf) AddressSet.empty in
+    Printf.printf "Reachable: %s -> %s\n%!"
+      (string_of_conf conf) (string_of_addrset r);
+    r
+
 
   let gc ((state, ss) as conf) =
     ({state with store = Store.restrict state.store (AddressSet.to_list
                                                        (reachable conf))},
      ss)
 
-  let step conf =
-    if !param_gc then
-      step_no_gc (gc conf)
-    else
-      step_no_gc conf
+  let step conf old =
+    Printf.printf "\nStepping %s from %s\n%!" (string_of_conf conf) (BatOption.map_default (fun (c, f) -> (string_of_conf c) ^ " with " ^ (string_of_frame f)) "none" old);
+    try
+      if !param_gc then
+        step_no_gc (gc conf) old
+      else
+        step_no_gc conf old
+    with
+    | exn -> match old with
+      | Some (c, _) -> raise (Failed (conf, c, exn))
+      | _ -> raise exn
 
   let conf_color (state, _) = match state.control with
     | Exp _ -> 0xFFDDDD
@@ -972,6 +992,11 @@ module BuildDSG =
           nodes := ConfMap.add node id !nodes;
           id
 
+      module ConfSet = Set.Make(L.ConfOrdering)
+      let marked = ref ConfSet.empty
+      let mark node = marked := ConfSet.add node !marked
+      let is_marked node = ConfSet.mem node !marked
+
       let edge_attributes ((_, f, _) : E.t) =
         [`Label (BatString.slice ~last:20 (L.string_of_stack_change f))]
       let default_edge_attributes _ = []
@@ -981,7 +1006,7 @@ module BuildDSG =
       let vertex_attributes (state : V.t) =
         [`Label (BatString.slice ~last:20 (L.string_of_conf state));
          `Style `Filled;
-         `Fillcolor (L.conf_color state)]
+         `Fillcolor (if not (is_marked state) then 0xFFFFFF else 0xFF0000)]
       let default_vertex_attributes _ = []
       let graph_attributes _ = []
     end
@@ -1114,10 +1139,12 @@ module BuildDSG =
        EdgeSet.filter (fun c -> not (G.mem_edge_e dsg.g c)) de,
        EpsSet.empty)
 
+    exception Stop of string
     let build_dyck exp =
       let c0 = L.inject exp in
       let i = ref 0 in
       let rec loop dsg ds de dh =
+        try
         i := !i + 1;
         if not (EpsSet.is_empty dh) then
           let c, c' = EpsSet.choose dh in
@@ -1142,13 +1169,67 @@ module BuildDSG =
             (EpsSet.union dh dh')
         else
           dsg
+        with
+        | L.Failed (conf, conf', exc) -> DotArg.mark conf'; DotArg.mark conf; output_dsg dsg "dsg.dot"; raise exc
       in loop { g = G.empty; q0 = c0; ecg = G.empty }
         (ConfSet.singleton c0) EdgeSet.empty EpsSet.empty
+
+  end
+
+module LinearEval =
+  functor (L: LangSignature) ->
+  struct
+    let eval exp =
+      let push stack v = v :: stack in
+      let pop = function
+        | [] -> []
+        | hd :: tl -> tl in
+      let top = function
+        | [] -> None
+        | hd :: tl -> Some hd in
+      let c0 = L.inject exp in
+      let rec aux stack conf =
+        try
+          Printf.printf "conf: %s, stack: [%s]\n%!"
+            (L.string_of_conf conf)
+            (BatString.concat ", "
+               (BatList.map (fun (_, f) -> L.string_of_frame f) stack));
+          let confs' = L.step conf (top stack) in
+          match confs' with
+          | [] ->
+            conf
+          | _ :: (g, conf') :: _ when Random.bool () ->
+            Printf.printf "%s -> %s -> %s\n%!"
+              (L.string_of_conf conf)
+              (L.string_of_stack_change g)
+              (L.string_of_conf conf');
+            aux (match g with
+                | L.StackPush f -> push stack (conf', f)
+                | L.StackPop _ -> pop stack
+                | L.StackUnchanged _ -> stack)
+              conf'
+          | (g, conf') :: _ ->
+            Printf.printf "%s -> %s -> %s\n%!"
+              (L.string_of_conf conf)
+              (L.string_of_stack_change g)
+              (L.string_of_conf conf');
+            aux (match g with
+                | L.StackPush f -> push stack (conf', f)
+                | L.StackPop _ -> pop stack
+                | L.StackUnchanged _ -> stack)
+              conf'
+        with e ->
+          print_endline (Printexc.get_backtrace ());
+          conf in
+      let c = aux [] c0 in
+      L.step c None
   end
 
 module L = ANFGarbageCollected
 module DSG = BuildDSG(L)
+module Eval = LinearEval(L)
 
+let () = Random.self_init ()
 let usage = "usage: " ^ (Sys.argv.(0)) ^ " [params] file"
 let file = ref None
 let () =
